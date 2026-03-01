@@ -78,7 +78,7 @@ MODELS = {
         'name': 'Opus',
         'role': 'Architect (design decisions only)',
         'provider': 'anthropic',
-        'model': 'claude-opus-4-6-20251101',
+        'model': 'claude-sonnet-4-5-20250514',
         'max_tokens': 1500,
         'cost': 'paid',
     },
