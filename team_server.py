@@ -51,7 +51,7 @@ MODELS = {
     },
     'grok': {
         'name': 'Grok',
-        'role': 'Lead Engineer + Reviewer',
+        'role': 'Co-Architect + Lead Engineer + Primary Debugger + Reviewer (2M context)',
         'provider': 'xai',
         'model': 'grok-3',
         'max_tokens': 2000,
@@ -202,6 +202,7 @@ ARCH_KEYWORDS = ['design', 'architect', 'structure', 'system', 'scale', 'infra',
 RESEARCH_KEYWORDS = ['research', 'compare', 'explain', 'what is', 'how does', 'best practice', 'alternative',
                      'library', 'framework', 'benchmark', 'why', 'difference', 'tradeoff']
 REVIEW_KEYWORDS = ['review', 'audit', 'check', 'bug', 'security', 'vulnerability', 'test', 'edge case']
+DEBUG_KEYWORDS = ['debug', 'error', 'crash', 'trace', 'stacktrace', 'exception', 'broken', 'failing', 'diagnose', 'root cause', 'scan']
 
 
 def classify_task(msg):
@@ -217,10 +218,15 @@ def classify_task(msg):
     has_arch = any(kw in m for kw in ARCH_KEYWORDS)
     has_research = any(kw in m for kw in RESEARCH_KEYWORDS)
     has_review = any(kw in m for kw in REVIEW_KEYWORDS)
+    has_debug = any(kw in m for kw in DEBUG_KEYWORDS)
 
     # Pure chat / simple question → Gemma only (free)
-    if not has_code and not has_arch and not has_research and not has_review:
+    if not has_code and not has_arch and not has_research and not has_review and not has_debug:
         return 'chat', []
+
+    # Debug → Grok primary (2M context can scan full codebase)
+    if has_debug:
+        return 'debug', ['grok']
 
     # Research → DeepSeek only
     if has_research and not has_code and not has_arch:
@@ -230,20 +236,20 @@ def classify_task(msg):
     if has_review:
         return 'review', ['grok', 'codex', 'opus']
 
-    # Architecture → Opus + DeepSeek
+    # Architecture → Opus + Grok (co-architects) + DeepSeek for reasoning
     if has_arch and not has_code:
-        return 'architecture', ['opus', 'deepseek']
+        return 'architecture', ['opus', 'grok']
 
-    # Code task → Grok + Codex (engineers), Opus reviews
+    # Code task → Grok + Codex (dual engineers)
     if has_code:
         return 'code', ['grok', 'codex']
 
-    # Default: Grok + DeepSeek
-    return 'general', ['grok', 'deepseek']
+    # Default: Grok (most versatile)
+    return 'general', ['grok']
 
 
 SYSTEM_PROMPTS = {
-    'grok': "You are a lead engineer. Write clean, production code. Be concise — code first, minimal explanation.",
+    'grok': "You are a lead engineer, co-architect, and primary debugger with a 2M token context window. You can scan entire codebases. Write clean code, design robust systems, and diagnose bugs with surgical precision. Be concise.",
     'codex': "You are a lead engineer. Write clean, production code. Be concise — code first, minimal explanation.",
     'opus': "You are the system architect. Design robust solutions. When reviewing code, be specific about bugs and fixes.",
     'deepseek': "You are a senior researcher and deep reasoning engine. Provide thorough technical analysis. Be concise.",
