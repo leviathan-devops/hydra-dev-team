@@ -341,17 +341,20 @@ class Orchestrator:
         agents_to_call = self.decide_agents(user_message)
         logger.info(f"Routing to: {agents_to_call}")
 
-        # Step 2: Call agents in parallel
+        # Step 2: Call agents in parallel (45s global timeout — agents have their own 60s HTTP timeout)
         futures = {self.executor.submit(self.call_agent, agent, user_message): agent for agent in agents_to_call}
 
         agent_responses = []
-        for future in as_completed(futures, timeout=25):
-            try:
-                result = future.result(timeout=25)
-                agent_responses.append(result)
-            except Exception as e:
-                agent = futures[future]
-                logger.warning(f"Agent {agent} timed out or failed: {e}")
+        try:
+            for future in as_completed(futures, timeout=65):
+                try:
+                    result = future.result(timeout=5)
+                    agent_responses.append(result)
+                except Exception as e:
+                    agent = futures[future]
+                    logger.warning(f"Agent {agent} failed: {e}")
+        except TimeoutError:
+            logger.warning("Global timeout reached, proceeding with collected responses")
 
         # Filter successful responses
         good_responses = [r for r in agent_responses if not r.get('error') and r.get('response')]
