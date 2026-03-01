@@ -1,9 +1,9 @@
-# Leviathan Enhanced Opus — Super Brain v1.0
-# DeepSeek R1 reasoning engine + Gemini context ingestion + OpenRouter sub-agents
+# Leviathan Enhanced Opus — Super Brain v2.0
+# DeepSeek R1 reasoning + Gemini 1M context + Multi-agent coding + Background daemons
 # Separate Railway instance from CloudFang Leviathan ecosystem
 FROM python:3.11-slim
 
-RUN pip install --no-cache-dir aiohttp flask gunicorn requests
+RUN pip install --no-cache-dir aiohttp flask gunicorn requests schedule
 
 WORKDIR /app
 COPY . /app/
