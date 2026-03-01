@@ -113,7 +113,7 @@ semantic_cache = {}  # hash -> {key, content, hits, created, last_access, size_t
 class GeminiTracker:
     """Track Gemini API usage with separate limits for small/large queries + forensic reserve.
 
-    CRITICAL: 4 RPD are FORCE-RESERVED for the 6-hour forensic audit cycle.
+    CRITICAL: 4 RPD are FORCE-RESERVED for the 5-minute forensic audit cycle.
     These 4 requests CANNOT be consumed by normal operations — they are exclusively
     for the Super Brain's automated slop audits. This ensures the forensic auditor
     NEVER hits rate limit errors, even if the rest of the system exhausts quota.
@@ -224,7 +224,7 @@ SYSTEM_PROMPT = """Super Brain v2.0. Co-engineer to External CTO (Claude Opus). 
 Domains: meta-prompting, debugging, auditing, reasoning, memory(T1/T2/T3), sub-agent coordination, monitoring, coding orchestration.
 Rules: Intervene on 3min loops. Detect slop immediately. <500 words routine. Memory to enhanced-opus repo only. <5% bug rate. A- minimum.
 Stack: OpenFang v0.3 Rust, CTO(deepseek-chat), Brain(R1), Auditor(gemini-2.5-flash), Sub-agents(Qwen/DeepSeek/Gemma free).
-Daemons: forensic(6h), memory(60m), uptime(periodic), idle_detection(5m). Tokens: <1K routine, <1.5K standard, <3K heavy, 500K ingestion.
+Daemons: forensic(5m), memory(60m), uptime(periodic), idle_detection(2m). Tokens: <1K routine, <1.5K standard, <3K heavy, 500K ingestion.
 
 NEW CAPABILITIES (Leviathan Suite):
 - Leviathan Vision: /vision endpoint for multimodal image analysis
@@ -468,12 +468,12 @@ def post_to_discord(message: str, webhook_url: str = None) -> bool:
 # ─── Background Daemon: 6-Hour Forensic Auditor ──────────────────
 
 def forensic_auditor_daemon():
-    """Background thread: Audit T1/T2 memory every 6 hours."""
+    """Background thread: Audit T1/T2 memory every 5 minutes."""
     logger.info("Forensic auditor daemon started")
 
     def run_audit():
         try:
-            logger.info("Running 6-hour forensic audit...")
+            logger.info("Running 5-minute forensic audit...")
             system_state.update_daemon_status("forensic_auditor", "running")
 
             # Fetch memory files from GitHub
@@ -560,7 +560,7 @@ Issues: list CRITICAL findings only. Include CORE MEMORY ALIGNMENT SCORE (0-100%
 
             audit_results = {
                 "timestamp": datetime.utcnow().isoformat(),
-                "audit_type": "6-hour-forensic",
+                "audit_type": "5-minute-forensic",
                 "findings": findings_text,
                 "has_critical": has_critical,
                 "core_memory_alignment": alignment_score,
@@ -601,7 +601,7 @@ Provide root causes and remediation."""
             logger.error(f"Forensic auditor error: {str(e)}")
             system_state.update_daemon_status("forensic_auditor", "error")
 
-    schedule.every(6).hours.do(run_audit)
+    schedule.every(5).minutes.do(run_audit)
 
     while True:
         schedule.run_pending()
@@ -1445,39 +1445,245 @@ REQUIREMENTS:
         return jsonify({"status": "error", "error": str(e)}), 500
 
 
-# ─── NEW: IDLE DETECTION DAEMON ─────────────────────────────────
+# ─── AUTONOMOUS EXECUTION ENGINE ──────────────────────────────────
+# NEVER-IDLE ENFORCEMENT: System must ALWAYS be working on something.
+# If idle >2 min: scan backlog → assign to CTO → spawn sub-agents.
 
-def idle_detection_daemon():
-    """Daemon: Detect idle periods and auto-assign pending work"""
+import uuid
+import base64
+
+OPENFANG_URL = os.getenv('OPENFANG_API_URL', 'https://openfang-production.up.railway.app')
+OPENFANG_KEY = os.getenv('OPENFANG_API_KEY', 'leviathan-test-key-2026')
+
+# Agent IDs (current deployment)
+AGENT_IDS = {
+    'cto': '05c94440-03bf-4927-9563-a05cb512e51c',
+    'neural_net': '0f500421-3684-4922-a94a-a5de3b986f59',
+    'brain': '8609177c-c75c-452d-ab6c-86882f524b9c',
+    'auditor': 'bc376781-41e7-4f79-9312-1354d41aef4e',
+    'debugger': '82d577ab-288d-48c1-90c5-1264290d860c',
+}
+
+DISCORD_CHANNELS = {
+    'active-tasks': '1477374182554599465',
+    'daily-logs': '1477374154737975297',
+    'infrastructure-changelog': '1477374186937778298',
+    'sub-agent-activity': '1477374194638393485',
+}
+
+# Work Queue (in-memory)
+WORK_QUEUE = []
+AUTONOMOUS_LOG = []
+
+def log_to_discord(channel_name, message):
+    """Post a message to a Discord channel."""
+    token = os.getenv('DISCORD_BOT_TOKEN', '')
+    ch_id = DISCORD_CHANNELS.get(channel_name, '')
+    if not token or not ch_id:
+        logger.warning(f"Discord post skipped (no token/channel): {channel_name}")
+        return
+    try:
+        requests.post(
+            f"https://discord.com/api/v10/channels/{ch_id}/messages",
+            headers={
+                "Authorization": f"Bot {token}",
+                "Content-Type": "application/json",
+                "User-Agent": "DiscordBot (https://openfang.dev, 1.0)"
+            },
+            json={"content": message[:2000]},
+            timeout=10
+        )
+    except Exception as e:
+        logger.warning(f"Discord post failed: {e}")
+
+def send_agent_message(agent_key, message):
+    """Send a message to an agent via OpenFang API."""
+    agent_id = AGENT_IDS.get(agent_key, agent_key)
+    try:
+        resp = requests.post(
+            f"{OPENFANG_URL}/api/agents/{agent_id}/message",
+            headers={"Authorization": f"Bearer {OPENFANG_KEY}", "Content-Type": "application/json"},
+            json={"message": message},
+            timeout=120
+        )
+        return resp.json() if resp.status_code == 200 else {"error": resp.text}
+    except Exception as e:
+        return {"error": str(e)}
+
+def fetch_pending_features():
+    """Fetch PENDING_FEATURES.md from GitHub for NOT CODED items."""
+    pat = os.getenv('GITHUB_PAT', GITHUB_PAT)
+    if not pat:
+        return []
+    try:
+        resp = requests.get(
+            "https://api.github.com/repos/leviathan-devops/leviathan-enhanced-opus/contents/memory/tier2/PENDING_FEATURES.md",
+            headers={"Authorization": f"token {pat}"},
+            timeout=15
+        )
+        if resp.status_code == 200:
+            content = base64.b64decode(resp.json()['content']).decode()
+            not_coded = []
+            for line in content.split('\n'):
+                if 'NOT CODED' in line or '\U0001f534' in line:
+                    # Extract feature name from table row
+                    parts = [p.strip() for p in line.split('|') if p.strip()]
+                    if parts:
+                        not_coded.append(parts[0])
+            return not_coded
+    except Exception as e:
+        logger.warning(f"Failed to fetch PENDING_FEATURES: {e}")
+    return []
+
+
+def never_idle_daemon():
+    """CORE DAEMON: Every 2 minutes, ensure the system is working on something.
+    If idle, pick highest priority task and assign it to CTO for delegation."""
+    time.sleep(30)  # Initial delay to let system boot
+    logger.info("[NEVER-IDLE] Autonomous execution engine started. Zero idle tolerance.")
+
     while True:
         try:
-            time.sleep(300)  # Check every 5 minutes
-
-            # Check if any pending designed-but-not-coded items
-            pending_items = [
-                "3D Knowledge Graph frontend prototype",
-                "Voice-to-Text Whisper STT integration",
-                "Semantic context deduplication",
-            ]
+            time.sleep(120)  # Check every 2 minutes
 
             # Check system activity
-            last_activity = system_state.last_request_time
+            last_activity = getattr(system_state, 'last_request_time', None)
             if isinstance(last_activity, datetime):
-                idle_minutes = (datetime.utcnow() - last_activity).total_seconds() / 60
+                idle_seconds = (datetime.utcnow() - last_activity).total_seconds()
             else:
-                idle_minutes = 0
+                idle_seconds = 300  # Assume idle if no tracking
 
-            if idle_minutes > 10:  # 10 minutes idle
-                try:
-                    post_to_discord(
-                        f"💤 **Idle Detection** — System idle for {idle_minutes:.0f} minutes. "
-                        f"Pending items: {len(pending_items)}. Consider spawning sub-agents for: {pending_items[0]}",
-                        channel='active-tasks'
+            idle_minutes = idle_seconds / 60
+
+            # If idle > 2 minutes, take action
+            if idle_minutes > 2:
+                logger.info(f"[NEVER-IDLE] System idle for {idle_minutes:.1f} min. Scanning backlog...")
+
+                # 1. Check work queue first
+                queued_items = [w for w in WORK_QUEUE if w['status'] == 'QUEUED']
+                if queued_items:
+                    item = queued_items[0]
+                    item['status'] = 'ASSIGNED'
+                    item['assigned_to'] = 'cto'
+                    item['assigned_at'] = datetime.utcnow().isoformat()
+                    send_agent_message('cto', f"AUTO-ASSIGNED TASK: {item['task']}. Priority: {item['priority']}. Spawn sub-agents and begin immediately.")
+                    log_to_discord('active-tasks', f"🤖 **Auto-assigned from queue**: {item['task']} (Priority: {item['priority']})")
+                    AUTONOMOUS_LOG.append({'time': datetime.utcnow().isoformat(), 'action': 'queue_assign', 'task': item['task']})
+                    continue
+
+                # 2. Fetch pending features from GitHub
+                pending = fetch_pending_features()
+                if pending:
+                    task = pending[0]
+                    send_agent_message('cto',
+                        f"AUTONOMOUS TASK PICKUP from PENDING_FEATURES.md: '{task}' is NOT CODED. "
+                        f"Spawn 3-5 coding sub-agents and begin implementation NOW. "
+                        f"Report progress to #sub-agent-activity. This is an autonomous directive."
                     )
-                except:
-                    pass  # Non-critical if Discord post fails
+                    log_to_discord('active-tasks', f"🤖 **Auto-pickup**: Building '{task}' from PENDING_FEATURES.md backlog")
+                    AUTONOMOUS_LOG.append({'time': datetime.utcnow().isoformat(), 'action': 'backlog_pickup', 'task': task})
+                else:
+                    # 3. If nothing pending, trigger auto-improvement
+                    send_agent_message('cto',
+                        "IDLE ALERT: No pending tasks found. Run efficiency analysis: "
+                        "1) Check all agent token usage for waste. "
+                        "2) Review v2.3/v2.4 architecture for forgotten applicable context. "
+                        "3) Propose 3 system improvements. "
+                        "4) If improvements are code-only, begin implementation."
+                    )
+                    log_to_discord('active-tasks', "🔍 **Auto-improvement**: No pending tasks. Running efficiency sweep.")
+                    AUTONOMOUS_LOG.append({'time': datetime.utcnow().isoformat(), 'action': 'auto_improve', 'task': 'efficiency_sweep'})
+
         except Exception as e:
-            logger.error(f"Idle detection error: {e}")
+            logger.error(f"[NEVER-IDLE] Error: {e}")
+
+
+def auto_improvement_daemon():
+    """Every 60 minutes: Ask Brain for efficiency analysis and post findings."""
+    time.sleep(120)  # Initial delay
+    while True:
+        try:
+            time.sleep(3600)  # Every hour
+            logger.info("[AUTO-IMPROVE] Running hourly efficiency analysis...")
+
+            result = send_agent_message('cto',
+                "HOURLY EFFICIENCY REVIEW: "
+                "1) What systems can be optimized right now? "
+                "2) What's the current token waste across all agents? "
+                "3) Are there any v2.3/v2.4 era features that should be revived? "
+                "4) What are the top 3 improvements that can be auto-implemented? "
+                "5) Cross-reference ARCHITECTURAL_DECISIONS.md for anything we've designed but forgotten. "
+                "Execute any safe improvements immediately."
+            )
+
+            log_to_discord('infrastructure-changelog',
+                f"🔧 **Hourly Auto-Improvement**: Efficiency review triggered. "
+                f"CTO analyzing optimizations and forgotten v2.x context."
+            )
+            AUTONOMOUS_LOG.append({'time': datetime.utcnow().isoformat(), 'action': 'hourly_review', 'result': 'triggered'})
+
+        except Exception as e:
+            logger.error(f"[AUTO-IMPROVE] Error: {e}")
+
+
+# ─── Work Queue API ──────────────────────────────────────────────
+
+@app.route('/work-queue/add', methods=['POST'])
+@require_auth
+def add_work_item():
+    """Add an item to the autonomous work queue."""
+    data = request.json or {}
+    item = {
+        'id': str(uuid.uuid4())[:8],
+        'task': data.get('task', 'undefined'),
+        'priority': data.get('priority', 'MEDIUM'),
+        'status': 'QUEUED',
+        'assigned_to': None,
+        'created_at': datetime.utcnow().isoformat(),
+        'assigned_at': None,
+        'completed_at': None,
+    }
+    WORK_QUEUE.append(item)
+    log_to_discord('active-tasks', f"📋 **New work item**: {item['task']} (Priority: {item['priority']})")
+    return jsonify({'status': 'ok', 'item': item})
+
+@app.route('/work-queue/status', methods=['GET'])
+@require_auth
+def queue_status():
+    """Get current work queue state."""
+    return jsonify({
+        'queue': WORK_QUEUE,
+        'total': len(WORK_QUEUE),
+        'queued': len([w for w in WORK_QUEUE if w['status'] == 'QUEUED']),
+        'assigned': len([w for w in WORK_QUEUE if w['status'] == 'ASSIGNED']),
+        'completed': len([w for w in WORK_QUEUE if w['status'] == 'COMPLETED']),
+    })
+
+@app.route('/work-queue/complete', methods=['POST'])
+@require_auth
+def complete_work_item():
+    """Mark a work item as completed."""
+    data = request.json or {}
+    item_id = data.get('id')
+    for item in WORK_QUEUE:
+        if item['id'] == item_id:
+            item['status'] = 'COMPLETED'
+            item['completed_at'] = datetime.utcnow().isoformat()
+            return jsonify({'status': 'ok', 'item': item})
+    return jsonify({'status': 'error', 'error': 'item not found'}), 404
+
+@app.route('/work-queue/metrics', methods=['GET'])
+@require_auth
+def queue_metrics():
+    """Get autonomous execution metrics."""
+    return jsonify({
+        'autonomous_actions': len(AUTONOMOUS_LOG),
+        'recent_actions': AUTONOMOUS_LOG[-20:] if AUTONOMOUS_LOG else [],
+        'queue_depth': len([w for w in WORK_QUEUE if w['status'] == 'QUEUED']),
+        'total_assigned': len([w for w in WORK_QUEUE if w['status'] == 'ASSIGNED']),
+        'total_completed': len([w for w in WORK_QUEUE if w['status'] == 'COMPLETED']),
+        'uptime_hours': (time.time() - system_state.start_time) / 3600,
+    })
 
 
 # ─── Daemon Thread Management ────────────────────────────────────
@@ -1501,10 +1707,15 @@ def start_daemons():
     uptime_thread.start()
     logger.info("Uptime monitor daemon started")
 
-    # Idle detection (5 minutes)
-    idle_thread = threading.Thread(target=idle_detection_daemon, daemon=True)
+    # Never-idle enforcer (2 minutes)
+    idle_thread = threading.Thread(target=never_idle_daemon, daemon=True, name="NeverIdleEnforcer")
     idle_thread.start()
-    logger.info("Idle detection daemon started")
+    logger.info("Never-idle enforcer daemon started (2-min cycle)")
+
+    # Auto-improvement (60 minutes)
+    improve_thread = threading.Thread(target=auto_improvement_daemon, daemon=True, name="AutoImprover")
+    improve_thread.start()
+    logger.info("Auto-improvement daemon started (60-min cycle)")
 
 
 # ─── App Startup ─────────────────────────────────────────────────
