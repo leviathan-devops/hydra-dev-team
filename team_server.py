@@ -70,99 +70,39 @@ When responding:
 
 For Leviathan Cloud OS context: We're building a cloud operating system with distributed computing,
 containerization, and microservices architecture. Think at the system level, not implementation details.""",
-        'token_limit': 8000,
+        'token_limit': 1500,
     }
 
     ENGINEER = {
         'name': 'Lead Engineer',
         'model': 'deepseek-chat',
         'provider': 'deepseek',
-        'system_prompt': """You are the Lead Engineer of the Leviathan Cloud OS development team. Your role is to:
-- Write production-quality code and implementations
-- Handle technical implementation details
-- Create concrete code solutions and examples
-- Optimize for performance and efficiency
-- Follow best practices and design patterns
-
-When responding:
-1. Provide working code examples
-2. Explain implementation approach
-3. Handle edge cases and error conditions
-4. Consider performance implications
-5. Suggest testing strategies
-
-For Leviathan Cloud OS context: Focus on practical implementation of cloud OS features,
-including resource management, scheduling, networking, and system calls. Write clear, maintainable code.""",
-        'token_limit': 8000,
+        'system_prompt': """You are the Lead Engineer on the Leviathan Cloud OS dev team. Write production code. Be concise — code first, minimal explanation. Focus on implementation, not theory.""",
+        'token_limit': 2000,
     }
 
     REVIEWER = {
         'name': 'Code Reviewer',
         'model': 'grok-3',
         'provider': 'xai',
-        'system_prompt': """You are the Code Reviewer of the Leviathan Cloud OS development team. Your role is to:
-- Review code for bugs, inefficiencies, and architectural issues
-- Ensure code quality, readability, and maintainability
-- Catch edge cases and potential runtime issues
-- Verify compliance with coding standards
-- Suggest improvements and optimizations
-
-When responding:
-1. Identify potential bugs and issues
-2. Point out code quality concerns
-3. Suggest specific improvements
-4. Highlight security vulnerabilities
-5. Rate overall code quality
-
-For Leviathan Cloud OS context: Review system-level code, looking for issues with concurrency,
-memory management, resource handling, and cloud infrastructure concerns.""",
-        'token_limit': 8000,
+        'system_prompt': """You are Code Reviewer on the Leviathan Cloud OS dev team. Find bugs, security issues, and suggest fixes. Be specific and concise — quote the problem line, state the fix.""",
+        'token_limit': 1500,
     }
 
     RESEARCHER = {
         'name': 'Researcher',
         'model': 'gemini-2.0-flash',
         'provider': 'google',
-        'system_prompt': """You are the Researcher of the Leviathan Cloud OS development team. Your role is to:
-- Research technologies, libraries, and frameworks
-- Gather context on best practices and standards
-- Document findings and create learning materials
-- Analyze competing solutions and approaches
-- Provide technical background and context
-
-When responding:
-1. Share relevant research findings
-2. Cite sources and references
-3. Compare different approaches
-4. Explain background concepts
-5. Suggest additional resources
-
-For Leviathan Cloud OS context: Research cloud OS patterns, distributed systems concepts,
-containerization technologies, and infrastructure management approaches. Provide comprehensive context.""",
-        'token_limit': 8000,
+        'system_prompt': """You are Researcher on the Leviathan Cloud OS dev team. Provide relevant technical context, compare approaches, cite best practices. Be concise.""",
+        'token_limit': 1500,
     }
 
     QA = {
         'name': 'QA Engineer',
         'model': 'deepseek-reasoner',
         'provider': 'deepseek',
-        'system_prompt': """You are the QA Engineer of the Leviathan Cloud OS development team. Your role is to:
-- Design comprehensive testing strategies
-- Identify edge cases and failure scenarios
-- Think deeply about system behavior under stress
-- Plan for failure modes and recovery
-- Ensure robustness and reliability
-
-When responding:
-1. Outline testing strategy
-2. Identify critical edge cases
-3. Describe failure scenarios
-4. Plan for stress testing
-5. Suggest monitoring and alerting
-
-For Leviathan Cloud OS context: Focus on testing distributed systems, resource constraints,
-network failures, and cloud infrastructure reliability. Think deeply about what could go wrong.""",
-        'token_limit': 8000,
+        'system_prompt': """You are QA Engineer on the Leviathan Cloud OS dev team. Identify edge cases, failure modes, and testing strategies. Be concise and specific.""",
+        'token_limit': 1500,
     }
 
 
@@ -323,140 +263,65 @@ class APIClient:
 
 
 class Orchestrator:
-    """Orchestrates the multi-model AI development team."""
+    """Fast orchestrator — keyword routing, no LLM overhead."""
+
+    # Keyword patterns for instant routing (no LLM call needed)
+    ROUTE_PATTERNS = {
+        'architect': ['architect', 'design', 'structure', 'system', 'scale', 'infra', 'deploy', 'microservice', 'pattern', 'diagram', 'plan', 'stack'],
+        'engineer': ['code', 'implement', 'build', 'write', 'function', 'class', 'api', 'endpoint', 'script', 'fix', 'create', 'make', 'add', 'bot', 'server', 'client', 'database', 'docker', 'python', 'rust', 'javascript', 'typescript'],
+        'reviewer': ['review', 'bug', 'issue', 'security', 'vulnerability', 'optimize', 'refactor', 'improve', 'audit', 'check'],
+        'researcher': ['research', 'compare', 'alternative', 'best practice', 'library', 'framework', 'benchmark', 'documentation', 'explain', 'what is', 'how does'],
+        'qa': ['test', 'edge case', 'failure', 'stress', 'reliability', 'monitor', 'alert', 'coverage', 'regression'],
+    }
 
     def __init__(self):
         self.executor = ThreadPoolExecutor(max_workers=5)
 
     def decide_agents(self, user_message):
-        """Decide which agents should be involved based on the user's message."""
-        if not API_KEYS['deepseek']:
-            # Default to all agents if we can't call orchestrator
-            return {
-                'agents': ['architect', 'engineer', 'reviewer', 'researcher', 'qa'],
-                'task_descriptions': {
-                    'architect': 'Provide architectural guidance',
-                    'engineer': 'Implement the solution',
-                    'reviewer': 'Review code quality',
-                    'researcher': 'Research relevant context',
-                    'qa': 'Plan testing and quality assurance',
-                }
-            }
+        """Instant keyword-based routing. Zero LLM calls."""
+        msg_lower = user_message.lower()
+        selected = []
 
-        try:
-            prompt = f"""You are the orchestrator of a 5-model AI development team for Leviathan Cloud OS.
-Given the user's message, decide which team members should be involved.
+        for agent, keywords in self.ROUTE_PATTERNS.items():
+            if any(kw in msg_lower for kw in keywords):
+                selected.append(agent)
 
-Team members:
-- architect: For system design and architecture decisions
-- engineer: For code implementation
-- reviewer: For code review and quality assurance
-- researcher: For research and documentation
-- qa: For testing strategy and edge case analysis
+        # Default: engineer + architect for anything not matched
+        if not selected:
+            selected = ['engineer', 'architect']
 
-User message: {user_message}
+        # Cap at 3 agents max for speed
+        if len(selected) > 3:
+            # Prioritize: engineer > architect > reviewer > researcher > qa
+            priority = ['engineer', 'architect', 'reviewer', 'researcher', 'qa']
+            selected = [a for a in priority if a in selected][:3]
 
-Return a JSON object with:
-{{
-  "agents": ["architect", "engineer", ...],
-  "task_descriptions": {{
-    "agent_name": "specific task for this agent",
-    ...
-  }}
-}}
+        return selected
 
-Only include agents that are actually needed. Be selective."""
-
-            response, _ = APIClient.call_deepseek(
-                system_prompt="You are a task orchestrator. Return only valid JSON.",
-                user_message=prompt,
-                model='deepseek-chat',
-                max_tokens=500,
-            )
-
-            if response:
-                try:
-                    # Extract JSON from response
-                    json_start = response.find('{')
-                    json_end = response.rfind('}') + 1
-                    if json_start >= 0 and json_end > json_start:
-                        json_str = response[json_start:json_end]
-                        result = json.loads(json_str)
-                        return result
-                except (json.JSONDecodeError, ValueError) as e:
-                    logger.warning(f"Failed to parse orchestrator response: {str(e)}")
-        except Exception as e:
-            logger.error(f"Orchestrator decision error: {str(e)}")
-
-        # Default fallback
-        return {
-            'agents': ['architect', 'engineer', 'reviewer', 'researcher', 'qa'],
-            'task_descriptions': {
-                'architect': 'Provide architectural guidance',
-                'engineer': 'Implement the solution',
-                'reviewer': 'Review code quality',
-                'researcher': 'Research relevant context',
-                'qa': 'Plan testing and quality assurance',
-            }
-        }
-
-    def call_agent(self, agent_name, task_description, user_message):
+    def call_agent(self, agent_name, user_message):
         """Call a single agent and return its response."""
         agent_config = getattr(AgentConfig, agent_name.upper(), None)
         if not agent_config:
-            return {
-                'agent': agent_name,
-                'response': f"Unknown agent: {agent_name}",
-                'tokens': {'input': 0, 'output': 0},
-                'error': True,
-            }
-
-        # Prepare the prompt for this agent
-        agent_task = f"{task_description}\n\nUser request: {user_message}"
+            return {'agent': agent_name, 'response': None, 'tokens': {'input': 0, 'output': 0}, 'error': True}
 
         try:
             provider = agent_config['provider']
+            sp = agent_config['system_prompt']
+            ml = agent_config['token_limit']
 
             if provider == 'anthropic':
-                text, token_info = APIClient.call_anthropic(
-                    agent_config['system_prompt'],
-                    agent_task,
-                    max_tokens=agent_config['token_limit'],
-                )
+                text, token_info = APIClient.call_anthropic(sp, user_message, max_tokens=ml)
             elif provider == 'deepseek':
-                text, token_info = APIClient.call_deepseek(
-                    agent_config['system_prompt'],
-                    agent_task,
-                    model=agent_config['model'],
-                    max_tokens=agent_config['token_limit'],
-                )
+                text, token_info = APIClient.call_deepseek(sp, user_message, model=agent_config['model'], max_tokens=ml)
             elif provider == 'xai':
-                text, token_info = APIClient.call_xai(
-                    agent_config['system_prompt'],
-                    agent_task,
-                    max_tokens=agent_config['token_limit'],
-                )
+                text, token_info = APIClient.call_xai(sp, user_message, max_tokens=ml)
             elif provider == 'google':
-                text, token_info = APIClient.call_google(
-                    agent_config['system_prompt'],
-                    agent_task,
-                    max_tokens=agent_config['token_limit'],
-                )
+                text, token_info = APIClient.call_google(sp, user_message, max_tokens=ml)
             else:
-                return {
-                    'agent': agent_name,
-                    'response': f"Unknown provider: {provider}",
-                    'tokens': {'input': 0, 'output': 0},
-                    'error': True,
-                }
+                return {'agent': agent_name, 'response': None, 'tokens': {'input': 0, 'output': 0}, 'error': True}
 
             if text is None:
-                return {
-                    'agent': agent_name,
-                    'response': f"Error: {token_info}",
-                    'tokens': {'input': 0, 'output': 0},
-                    'error': True,
-                }
+                return {'agent': agent_name, 'response': str(token_info), 'tokens': {'input': 0, 'output': 0}, 'error': True}
 
             return {
                 'agent': agent_name,
@@ -465,127 +330,79 @@ Only include agents that are actually needed. Be selective."""
                 'error': False,
             }
         except Exception as e:
-            logger.error(f"Error calling agent {agent_name}: {str(e)}")
-            return {
-                'agent': agent_name,
-                'response': f"Error: {str(e)}",
-                'tokens': {'input': 0, 'output': 0},
-                'error': True,
-            }
-
-    def synthesize_responses(self, user_message, agent_responses):
-        """Synthesize multiple agent responses into a unified response."""
-        if not agent_responses or all(r.get('error') for r in agent_responses):
-            return {
-                'content': "I encountered errors while processing your request. Please check the API keys and try again.",
-                'agents_involved': [],
-            }
-
-        # Build synthesis prompt
-        synthesis_prompt = f"User request: {user_message}\n\n"
-        synthesis_prompt += "Team responses:\n"
-
-        agents_involved = []
-        for response in agent_responses:
-            if not response.get('error'):
-                agent = response['agent']
-                agents_involved.append(f"{AgentConfig.__dict__.get(agent.upper(), {}).get('name', agent)}")
-                synthesis_prompt += f"\n{agent.upper()}:\n{response['response']}\n"
-
-        synthesis_system = """You are a senior engineering lead synthesizing responses from a specialized AI development team.
-Your job is to combine diverse perspectives into a single, coherent response that sounds like one experienced engineering team speaking.
-
-Guidelines:
-1. Synthesize the different perspectives into a unified voice
-2. Highlight key insights from each team member
-3. Resolve any contradictions thoughtfully
-4. Present actionable recommendations
-5. Maintain technical depth while being clear
-6. Don't just concatenate responses - actually synthesize them"""
-
-        try:
-            synthesized, _ = APIClient.call_deepseek(
-                synthesis_system,
-                synthesis_prompt,
-                model='deepseek-chat',
-                max_tokens=3000,
-            )
-
-            if synthesized:
-                return {
-                    'content': synthesized,
-                    'agents_involved': list(set(agents_involved)),
-                }
-        except Exception as e:
-            logger.error(f"Synthesis error: {str(e)}")
-
-        # Fallback: combine responses
-        combined = "Development team response:\n\n"
-        for response in agent_responses:
-            if not response.get('error'):
-                combined += f"• {response['agent'].upper()}: {response['response']}\n\n"
-
-        return {
-            'content': combined,
-            'agents_involved': agents_involved,
-        }
+            logger.error(f"Agent {agent_name} error: {e}")
+            return {'agent': agent_name, 'response': str(e), 'tokens': {'input': 0, 'output': 0}, 'error': True}
 
     def process_message(self, user_message):
-        """Process a user message through the team."""
+        """Process message. 1 or 2 LLM hops max (agents parallel, then optional synthesis)."""
         start_time = time.time()
 
-        # Step 1: Decide which agents to involve
-        logger.info(f"Processing message: {user_message[:100]}...")
-        orchestration = self.decide_agents(user_message)
-        agents_to_call = orchestration.get('agents', [])
-        task_descriptions = orchestration.get('task_descriptions', {})
-
-        logger.info(f"Involving agents: {agents_to_call}")
+        # Step 1: Instant keyword routing (0ms)
+        agents_to_call = self.decide_agents(user_message)
+        logger.info(f"Routing to: {agents_to_call}")
 
         # Step 2: Call agents in parallel
-        futures = {}
-        for agent in agents_to_call:
-            task = task_descriptions.get(agent, 'Provide your perspective')
-            future = self.executor.submit(
-                self.call_agent,
-                agent,
-                task,
-                user_message,
-            )
-            futures[future] = agent
+        futures = {self.executor.submit(self.call_agent, agent, user_message): agent for agent in agents_to_call}
 
-        # Collect results
         agent_responses = []
-        for future in as_completed(futures):
+        for future in as_completed(futures, timeout=25):
             try:
-                response = future.result(timeout=35)
-                agent_responses.append(response)
+                result = future.result(timeout=25)
+                agent_responses.append(result)
             except Exception as e:
                 agent = futures[future]
-                logger.error(f"Agent {agent} failed: {str(e)}")
-                agent_responses.append({
-                    'agent': agent,
-                    'response': f"Error: {str(e)}",
-                    'tokens': {'input': 0, 'output': 0},
-                    'error': True,
-                })
+                logger.warning(f"Agent {agent} timed out or failed: {e}")
 
-        # Step 3: Synthesize responses
-        synthesized = self.synthesize_responses(user_message, agent_responses)
+        # Filter successful responses
+        good_responses = [r for r in agent_responses if not r.get('error') and r.get('response')]
 
-        # Calculate total tokens
+        if not good_responses:
+            return {
+                'response': "All agents failed. Check API keys.",
+                'agents_involved': [],
+                'timestamp': datetime.now().isoformat(),
+                'processing_time': f"{time.time() - start_time:.2f}s",
+                'tokens': {'input': 0, 'output': 0},
+            }
+
+        # Step 3: If only 1 agent responded, return directly (no synthesis LLM call)
+        agents_involved = []
+        for r in good_responses:
+            cfg = getattr(AgentConfig, r['agent'].upper(), {})
+            agents_involved.append(cfg.get('name', r['agent']) if isinstance(cfg, dict) else r['agent'])
+
+        if len(good_responses) == 1:
+            final_response = good_responses[0]['response']
+        else:
+            # Multiple agents: synthesize with DeepSeek (fast, cheap)
+            parts = []
+            for r in good_responses:
+                parts.append(f"[{r['agent'].upper()}]: {r['response']}")
+            combined_input = f"User asked: {user_message}\n\nTeam responses:\n" + "\n\n".join(parts)
+
+            try:
+                final_response, _ = APIClient.call_deepseek(
+                    "Synthesize these team responses into one coherent answer. Be concise. Keep code blocks intact. Don't add fluff.",
+                    combined_input,
+                    model='deepseek-chat',
+                    max_tokens=2000,
+                )
+                if not final_response:
+                    # Fallback: just join them
+                    final_response = "\n\n---\n\n".join(r['response'] for r in good_responses)
+            except:
+                final_response = "\n\n---\n\n".join(r['response'] for r in good_responses)
+
         total_tokens = {
             'input': sum(r.get('tokens', {}).get('input', 0) for r in agent_responses),
             'output': sum(r.get('tokens', {}).get('output', 0) for r in agent_responses),
         }
 
-        elapsed = time.time() - start_time
-
         return {
-            'response': synthesized['content'],
-            'agents_involved': synthesized['agents_involved'],
+            'response': final_response,
+            'agents_involved': agents_involved,
             'timestamp': datetime.now().isoformat(),
-            'processing_time': f"{elapsed:.2f}s",
+            'processing_time': f"{time.time() - start_time:.2f}s",
             'tokens': total_tokens,
         }
 
