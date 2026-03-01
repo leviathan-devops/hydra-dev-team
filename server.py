@@ -478,29 +478,40 @@ def forensic_auditor_daemon():
             system_state.update_daemon_status("forensic_auditor", "running")
 
             # Fetch memory files from GitHub
-            session_handoff = fetch_github_file(
-                "leviathan-devops/leviathan-enhanced-opus",
-                "SESSION_HANDOFF.md"
-            )
-            current_state = fetch_github_file(
-                "leviathan-devops/leviathan-enhanced-opus",
-                "CURRENT_STATE.md"
-            )
-            active_bugs = fetch_github_file(
-                "leviathan-devops/leviathan-enhanced-opus",
-                "ACTIVE_BUGS.md"
-            )
-            recent_commits = fetch_github_file(
-                "leviathan-devops/leviathan-enhanced-opus",
-                "RECENT_COMMITS.md"
-            )
+            repo = "leviathan-devops/leviathan-enhanced-opus"
+            session_handoff = fetch_github_file(repo, "memory/tier1/SESSION_HANDOFF.md")
+            current_state = fetch_github_file(repo, "memory/tier2/CURRENT_STATE.md")
+            active_bugs = fetch_github_file(repo, "memory/tier2/ACTIVE_BUGS.md")
+            recent_commits = fetch_github_file(repo, "memory/tier2/RECENT_COMMITS.md")
+
+            # CORE MEMORY CHECK — fetch immutable baselines for drift detection
+            peak_baseline = fetch_github_file(repo, "memory/tier3/core_memory/PEAK_PERFORMANCE_BASELINE.md")
+            anti_patterns = fetch_github_file(repo, "memory/tier3/core_memory/ANTI_PATTERNS.md")
+            owner_directives = fetch_github_file(repo, "memory/tier3/core_memory/OWNER_DIRECTIVES.md")
 
             # Build compact audit prompt (3-5K tokens target)
-            memory_summary = f"""
-T1 MEMORY (SESSION_HANDOFF.md): {len(session_handoff)} chars
-T2 MEMORY (CURRENT_STATE.md): {len(current_state)} chars
+            # Include core memory excerpts for drift detection
+            core_memory_excerpt = ""
+            if peak_baseline:
+                # Extract just the deviation thresholds table (compact)
+                for line in peak_baseline.split('\n'):
+                    if 'Baseline' in line or 'Yellow' in line or 'Red' in line or '|' in line:
+                        core_memory_excerpt += line + '\n'
+            if anti_patterns:
+                # Extract just the AP codes (compact)
+                for line in anti_patterns.split('\n'):
+                    if line.startswith('### AP-'):
+                        core_memory_excerpt += line + '\n'
+
+            memory_summary = f"""FORENSIC AUDIT — T1/T2 + CORE MEMORY ALIGNMENT CHECK
+
+T1 (SESSION_HANDOFF.md): {len(session_handoff)} chars
+T2 (CURRENT_STATE.md): {len(current_state)} chars
 ACTIVE_BUGS: {len(active_bugs)} chars
 RECENT_COMMITS: {len(recent_commits)} chars
+
+CORE MEMORY DEVIATION THRESHOLDS:
+{core_memory_excerpt[:500]}
 
 Check for:
 1. Stale data (older than 24h timestamps)
@@ -508,12 +519,15 @@ Check for:
 3. Paper architecture (designed but not coded)
 4. Slop contagion (wrong models, expired tokens, stale configs)
 5. Memory drift between repos
+6. CORE MEMORY DEVIATION — compare current state against peak baseline
+7. Anti-pattern violations (AP-001 through AP-008)
+8. Owner directive compliance (token economics, output standards)
 
-Summary findings only. Max 2000 words.
-"""
+If deviation from core memory baseline exceeds 20%, mark as CRITICAL.
+Summary findings only. Max 2000 words."""
 
             # Call DeepSeek R1 for audit
-            audit_prompt = f"""Forensic memory audit for Leviathan Enhanced Opus.
+            audit_prompt = f"""Forensic memory audit for Leviathan Super Brain.
 
 {memory_summary}
 
@@ -523,7 +537,7 @@ SAMPLE T1:
 SAMPLE T2:
 {current_state[:1000]}
 
-Issues: list CRITICAL findings only."""
+Issues: list CRITICAL findings only. Include CORE MEMORY ALIGNMENT SCORE (0-100%)."""
 
             result = run_async(call_deepseek_r1(
                 audit_prompt,
@@ -531,12 +545,27 @@ Issues: list CRITICAL findings only."""
                 max_tokens=2048
             ))
 
-            # Store results
+            # Store results with core memory alignment tracking
+            findings_text = result.get("content", "")
+            has_critical = "CRITICAL" in findings_text.upper()
+
+            # Extract core memory alignment score if present
+            alignment_score = 100  # default
+            for line in findings_text.split('\n'):
+                if 'ALIGNMENT' in line.upper() and '%' in line:
+                    import re
+                    nums = re.findall(r'(\d+)%', line)
+                    if nums:
+                        alignment_score = int(nums[0])
+                    break
+
             audit_results = {
                 "timestamp": datetime.utcnow().isoformat(),
                 "audit_type": "6-hour-forensic",
-                "findings": result.get("content", ""),
-                "has_critical": "CRITICAL" in result.get("content", "").upper(),
+                "findings": findings_text,
+                "has_critical": has_critical,
+                "core_memory_alignment": alignment_score,
+                "core_memory_deviation": alignment_score < 80,
                 "usage": result.get("usage", {})
             }
 
