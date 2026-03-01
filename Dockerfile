@@ -1,6 +1,5 @@
-# Leviathan Super Brain Dev Team v3.0
-# Multi-model AI software engineering team
-# Claude (Architect) + DeepSeek (Engineer) + Grok (Reviewer) + Gemini (Researcher) + DeepSeek-R1 (QA)
+# Leviathan Super Brain Dev Team v5.0 — Staged Pipeline
+# Gemma(I/O) → Opus+DeepSeek(arch) → Grok×2(prototype) → Codex×2(production) → Opus(review) → Gemma(deliver)
 FROM python:3.11-slim
 
 RUN pip install --no-cache-dir flask gunicorn requests "discord.py>=2.3"
