@@ -1686,6 +1686,196 @@ def queue_metrics():
     })
 
 
+# ─── FRUSTRATION PREVENTION SYSTEM ───────────────────────────────
+# Owner Frustration Prevention: Semantic audit + Quality gate
+
+@app.route('/frustration-scan', methods=['POST'])
+@require_auth
+def frustration_scan():
+    """
+    Scan an output for known Owner frustration triggers before delivery.
+
+    This endpoint implements the 10 Frustration Triggers (FT-001 through FT-010)
+    and blocks outputs that would trigger Owner frustration BEFORE they ship.
+
+    POST body:
+    {
+        "content": "output text to scan",
+        "type": "pdf|changelog|status|code|doc",
+        "description": "optional description"
+    }
+
+    Returns:
+    {
+        "status": "BLOCKED|PASS",
+        "triggers_found": N,
+        "triggers": [{id, severity, description, fix}, ...],
+        "recommendation": "..."
+    }
+    """
+    try:
+        data = request.json or {}
+        content = data.get('content', '')
+        output_type = data.get('type', 'unknown').lower()
+
+        triggers_found = []
+
+        # ─── FT-001: Slop Detection (Fabricated Data) ───
+        if output_type in ('changelog', 'pdf', 'doc', 'status'):
+            # Check for implementation claims without commit hashes
+            slop_markers = ['implemented', 'operational', 'active', 'running', 'deployed', 'completed']
+            for marker in slop_markers:
+                if marker in content.lower():
+                    # If marker found but no commit hash nearby, flag it
+                    if 'commit' not in content.lower() and 'hash' not in content.lower():
+                        triggers_found.append({
+                            'id': 'FT-001',
+                            'severity': 'CRITICAL',
+                            'description': f'Slop detected: "{marker}" claimed without git commit hash',
+                            'fix': 'Remove claim or add commit hash via `git log --oneline`'
+                        })
+                        break  # Only flag once per output
+
+        # ─── FT-002: PDF Design Quality ───
+        if output_type == 'pdf':
+            # Check for dark theme indicators
+            dark_markers = ['dark', 'background: #000', 'background: #1a1a', 'rgb(0,0,0)', '#000000']
+            light_gray = ['#999', '#aaa', '#bbb', 'gray text', 'light gray']
+
+            for marker in dark_markers:
+                if marker in content.lower():
+                    triggers_found.append({
+                        'id': 'FT-002',
+                        'severity': 'HIGH',
+                        'description': f'PDF dark theme detected — violates canonical template',
+                        'fix': 'Switch to: white background, navy (#00003d) headers, dark body text'
+                    })
+                    break
+
+            for marker in light_gray:
+                if marker in content.lower():
+                    triggers_found.append({
+                        'id': 'FT-002',
+                        'severity': 'HIGH',
+                        'description': f'PDF light gray text detected — unreadable on white background',
+                        'fix': 'Use dark text (#1a1a1a minimum) on white background'
+                    })
+                    break
+
+        # ─── FT-004: Promise Tracking ───
+        # Promises that aren't in WORK_QUEUE are failures waiting to happen
+        promise_markers = ["i'll build", "i'll create", "i'm going to", "will create", "let me", "working on", "will implement"]
+        promise_count = 0
+        for marker in promise_markers:
+            if marker in content.lower():
+                promise_count += 1
+
+        if promise_count > 0:
+            triggers_found.append({
+                'id': 'FT-004',
+                'severity': 'MEDIUM',
+                'description': f'Promise detected: {promise_count} promises in output — must be tracked in WORK_QUEUE',
+                'fix': 'Add to /work-queue/add endpoint with explicit deliverable path'
+            })
+
+        # ─── FT-005: Token Waste (Routine calls exceeding budget) ───
+        # Check for token budget bloat claims
+        if 'tokens' in content.lower() or 'budget' in content.lower():
+            import re
+            # Look for numbers followed by K or budget claims
+            token_claims = re.findall(r'(\d+)\s*[kK]\s*(?:tokens?|budget)', content)
+            for claim in token_claims:
+                claim_int = int(claim)
+                # Routine calls should be <1K
+                if claim_int > 3 and 'routine' in content.lower():
+                    triggers_found.append({
+                        'id': 'FT-005',
+                        'severity': 'HIGH',
+                        'description': f'Token bloat: {claim_int}K for routine operation exceeds <1K budget',
+                        'fix': 'Compress system prompt and optimize for <1K tokens per routine call'
+                    })
+                    break
+
+        # ─── FT-006: Repeating Fixed Issues ───
+        # Check if output mentions fixing something twice or recurring issues
+        repeat_markers = ['again', 'repeated', 'recurring', 'resurfaced', 'fixed before', 'same bug', 'same issue', 'same mistake']
+        for marker in repeat_markers:
+            if marker in content.lower():
+                triggers_found.append({
+                    'id': 'FT-006',
+                    'severity': 'CRITICAL',
+                    'description': f'Recurrence detected: "{marker}" — this should have been prevented',
+                    'fix': 'Check FRUSTRATION_PREVENTION.md — if fixed, verify fix is still in place'
+                })
+                break
+
+        # ─── FT-007: Quality Gate Failure ───
+        # Check for obvious quality issues that should have been caught
+        quality_red_flags = [
+            ('typo', 'contains spelling error'),
+            ('TODO', 'unfinished code/doc'),
+            ('FIXME', 'known issue not fixed'),
+            ('placeholder', 'incomplete content'),
+            ('WIP', 'work in progress shipped'),
+            ('xxx', 'debugging marker left in'),
+        ]
+        for flag, description in quality_red_flags:
+            if flag in content:
+                triggers_found.append({
+                    'id': 'FT-007',
+                    'severity': 'HIGH',
+                    'description': f'Quality gate failure: {description} — below A- standard',
+                    'fix': 'Fix issues and re-run quality checks before shipping'
+                })
+                break
+
+        # ─── FT-008: Cognitive Overload ───
+        # Check for signs Owner needs to do system work
+        cognitive_load_markers = ['please track', 'manually', 'remember to', 'keep in mind', 'don\'t forget']
+        for marker in cognitive_load_markers:
+            if marker in content.lower():
+                triggers_found.append({
+                    'id': 'FT-008',
+                    'severity': 'MEDIUM',
+                    'description': f'Cognitive load detected: "{marker}" — Owner shouldn\'t have to remember this',
+                    'fix': 'Add to WORK_QUEUE, memory, or automated daemon instead'
+                })
+                break
+
+        # ─── FT-010: Infrastructure Not Ready ───
+        # Check for "design-only" claims about infrastructure
+        infrastructure_slop = ['designed', 'should be', 'planned to', 'will implement', 'needs to be']
+        for marker in infrastructure_slop:
+            if marker in content.lower() and ('infrastructure' in content.lower() or 'server' in content.lower() or 'discord' in content.lower()):
+                triggers_found.append({
+                    'id': 'FT-010',
+                    'severity': 'HIGH',
+                    'description': f'Infrastructure not production-ready: "{marker}" found without implementation',
+                    'fix': 'Prioritize infrastructure completion. Code or don\'t claim it.'
+                })
+                break
+
+        # Determine if output should be blocked
+        blocked = any(t['severity'] == 'CRITICAL' for t in triggers_found)
+
+        # Log the scan
+        logger.info(f"Frustration scan: {output_type} | triggers: {len(triggers_found)} | blocked: {blocked}")
+        if triggers_found:
+            logger.info(f"Triggers: {[t['id'] for t in triggers_found]}")
+
+        return jsonify({
+            'status': 'BLOCKED' if blocked else 'PASS',
+            'triggers_found': len(triggers_found),
+            'triggers': triggers_found,
+            'recommendation': 'FIX ALL CRITICAL triggers before delivery' if blocked else ('FIX HIGH triggers before delivery' if any(t['severity'] == 'HIGH' for t in triggers_found) else 'Clear to ship'),
+            'output_type': output_type
+        })
+
+    except Exception as e:
+        logger.error(f"Frustration scan error: {str(e)}")
+        return jsonify({'status': 'error', 'error': str(e)}), 500
+
+
 # ─── Daemon Thread Management ────────────────────────────────────
 
 def start_daemons():
