@@ -787,12 +787,27 @@ DISCORD_TOKEN = os.environ.get('DISCORD_BOT_TOKEN_DEVTEAM', '')
 DISCORD_GUILD_ID = 1477804209842815382
 
 discord_bot = None
+_discord_lock_file = None
 
 def start_discord_bot():
-    """Run Discord bot in background thread alongside Flask."""
-    global discord_bot
+    """Run Discord bot in background thread alongside Flask.
+    Uses file lock so only ONE gunicorn worker runs the bot (prevents duplicate replies).
+    """
+    global discord_bot, _discord_lock_file
     if not DISCORD_TOKEN:
         logger.warning("No DISCORD_BOT_TOKEN_DEVTEAM set, skipping Discord bot")
+        return
+
+    # ── Guard: only one worker gets the lock ──
+    import fcntl
+    try:
+        _discord_lock_file = open('/tmp/discord_bot.lock', 'w')
+        fcntl.flock(_discord_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _discord_lock_file.write(str(os.getpid()))
+        _discord_lock_file.flush()
+        logger.info(f"Discord bot lock acquired by PID {os.getpid()}")
+    except (IOError, OSError):
+        logger.info(f"PID {os.getpid()} — another worker owns the Discord bot, skipping")
         return
 
     try:
