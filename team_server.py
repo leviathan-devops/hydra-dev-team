@@ -52,43 +52,51 @@ API_KEYS = {
 MODELS = {
     'gemma': {
         'name': 'Gemma 3 27B',
-        'role': 'Chat Bridge + Synthesis',
+        'role': 'Chat Bridge + Synthesis (FREE I/O)',
         'provider': 'openrouter',
         'model': 'google/gemma-3-27b-it',
         'max_tokens': 1000,
         'cost': 'free',
     },
     'grok': {
-        'name': 'Grok',
+        'name': 'Grok 4.1 Reasoning',
         'role': 'Lead Engineer + Debugger + Reviewer (2M context)',
         'provider': 'xai',
-        'model': 'grok-3',
-        'max_tokens': 1500,
+        'model': 'grok-4-1213',
+        'max_tokens': 4096,
         'cost': 'paid',
     },
     'codex': {
-        'name': 'Codex',
-        'role': 'Engineer + Reviewer',
+        'name': 'GPT Codex 5.3',
+        'role': 'Production Engineer + Code Review',
         'provider': 'openai',
-        'model': 'gpt-4o',
-        'max_tokens': 1500,
+        'model': 'codex-5.3',
+        'max_tokens': 4096,
         'cost': 'paid',
     },
     'opus': {
-        'name': 'Opus 4.6',
-        'role': 'Architect (design decisions only)',
+        'name': 'Claude Opus 4.6',
+        'role': 'Systems Architect (design decisions only)',
         'provider': 'anthropic',
         'model': 'claude-opus-4-6',
-        'max_tokens': 1500,
+        'max_tokens': 2048,
         'cost': 'paid',
     },
-    'deepseek': {
-        'name': 'DeepSeek',
-        'role': 'Research + Reasoning',
+    'deepseek_reason': {
+        'name': 'DeepSeek R1',
+        'role': 'Deep Reasoning + Verification',
+        'provider': 'deepseek',
+        'model': 'deepseek-reasoner',
+        'max_tokens': 2048,
+        'cost': 'paid',
+    },
+    'deepseek_chat': {
+        'name': 'DeepSeek V3',
+        'role': 'Research + Fast Intent Classification',
         'provider': 'deepseek',
         'model': 'deepseek-chat',
         'max_tokens': 1500,
-        'cost': 'paid',
+        'cost': 'paid-cheap',
     },
 }
 
@@ -204,46 +212,28 @@ def call_model(model_key, system_prompt, user_message, max_tokens=None):
 
 executor = ThreadPoolExecutor(max_workers=5)
 
-# ─── Classification Keywords ─────────────────────────────────
-# BUILD triggers the full 6-stage pipeline. Everything else is lightweight single-model.
-BUILD_KEYWORDS = ['build', 'create', 'implement', 'make', 'develop', 'program', 'app', 'application',
-                  'software', 'platform', 'tool', 'service', 'project', 'startup', 'product', 'saas',
-                  'i want', 'i need', 'can you make', 'build me', 'create me']
+# ─── BUILD GATE — STRICT KEYWORD CHECK ──────────────────────
+# Build pipeline ONLY triggers if "build", "deploy", or "create" appear
+# within the FIRST 10 TOKENS of the input. Everything else defaults to
+# Gemma → DeepSeek fast-path (cheap, low latency, no frontier model burn).
+
+BUILD_GATE_KEYWORDS = ['build', 'deploy', 'create']
+
+# Secondary keywords — only checked AFTER DeepSeek confirms complex intent
 DEBUG_KEYWORDS = ['debug', 'error', 'crash', 'trace', 'stacktrace', 'exception', 'broken', 'failing',
-                  'diagnose', 'root cause', 'scan', 'bug', 'not working', 'fix']
-RESEARCH_KEYWORDS = ['research', 'compare', 'explain', 'what is', 'how does', 'best practice',
-                     'alternative', 'library', 'framework', 'benchmark', 'why', 'difference', 'tradeoff']
-QUICK_CODE_KEYWORDS = ['function', 'script', 'snippet', 'regex', 'query', 'one-liner', 'helper',
-                       'util', 'convert', 'parse', 'format']
+                  'diagnose', 'root cause', 'scan', 'bug', 'not working']
 
 
-def classify_task(msg):
-    """Classify into: build (full pipeline), debug, research, quick_code, or chat."""
+def check_build_gate(msg):
+    """Returns True only if build/deploy/create appear in the first 10 tokens."""
+    first_10 = ' '.join(msg.split()[:10]).lower()
+    return any(kw in first_10 for kw in BUILD_GATE_KEYWORDS)
+
+
+def check_debug_keywords(msg):
+    """Check if message contains debug-related keywords anywhere."""
     m = msg.lower()
-    words = len(msg.split())
-
-    # Large input → Grok ingests first (2M context)
-    if words > 500:
-        return 'large_input'
-
-    # BUILD: user describing an idea/project/software to create → full staged pipeline
-    if any(kw in m for kw in BUILD_KEYWORDS):
-        return 'build'
-
-    # Debug → Grok solo
-    if any(kw in m for kw in DEBUG_KEYWORDS):
-        return 'debug'
-
-    # Research → DeepSeek solo
-    if any(kw in m for kw in RESEARCH_KEYWORDS):
-        return 'research'
-
-    # Quick code (small utility, not a full project) → Grok solo
-    if any(kw in m for kw in QUICK_CODE_KEYWORDS):
-        return 'quick_code'
-
-    # Default → Gemma (free chat)
-    return 'chat'
+    return any(kw in m for kw in DEBUG_KEYWORDS)
 
 
 def _track(result, model_name, text, tokens):
@@ -256,98 +246,35 @@ def _track(result, model_name, text, tokens):
 
 def run_pipeline(user_message):
     """
-    v5.0 Staged Pipeline.
+    v5.2 Workflow — Credit-Conservative Staged Pipeline.
 
-    BUILD workflow (sequential, each stage feeds the next):
-      1. Gemma intake (free)
-      2. Opus architecture → DeepSeek validates → architecture finalized
-      3. Grok rapid-prototypes from blueprints
-      4. Codex production-hardens the prototype
-      5. Opus + optional DeepSeek final review
-      6. Gemma presents to user (free)
+    DEFAULT PATH (99% of messages):
+      Gemma (FREE) → DeepSeek Chat V3 (cheap) → Gemma (FREE) → user
+      Total cost: ~$0.001 per message. Low latency.
 
-    Lightweight paths skip straight to a single model.
+    BUILD PATH (only if build/deploy/create in first 10 tokens):
+      Gemma (FREE intake) → DeepSeek R1 (master prompt) → Opus (architecture)
+      → Grok x2 parallel (prototype) → Codex x2 parallel (production hardening)
+      → DeepSeek R1 (verification) → [loop if needed] → Gemma (FREE delivery)
+
+    DEBUG PATH (keyword triggered):
+      Gemma → Grok (2M context, surgical fix) → Gemma
     """
     start = time.time()
-    task_type = classify_task(user_message)
+    build_gate = check_build_gate(user_message)
+    is_debug = check_debug_keywords(user_message)
+    words = len(user_message.split())
 
     result = {
-        'task_type': task_type,
+        'task_type': 'pending',
         'models_used': [],
         'tokens': {'input': 0, 'output': 0},
         'stages': [],
+        'stage_detail': [],
     }
 
-    # ═══════════════════════════════════════════════════════════════
-    # CHAT — Gemma only (FREE)
-    # ═══════════════════════════════════════════════════════════════
-    if task_type == 'chat':
-        text, tok = call_model('gemma',
-            "Leviathan dev team interface. Direct, concise.",
-            user_message, max_tokens=800)
-        result['response'] = text or "I'm here. What do you need?"
-        result['models_used'] = ['Gemma 3']
-        if isinstance(tok, dict):
-            result['tokens'] = tok
-        result['processing_time'] = f"{time.time() - start:.2f}s"
-        return result
-
-    # ═══════════════════════════════════════════════════════════════
-    # LARGE INPUT — Grok ingests (2M context)
-    # ═══════════════════════════════════════════════════════════════
-    if task_type == 'large_input':
-        text, tok = call_model('grok',
-            "Analyze this large input. Structured summary + action plan.",
-            user_message, max_tokens=1500)
-        result['response'] = text or "Failed to process."
-        _track(result, 'Grok', text, tok)
-        result['processing_time'] = f"{time.time() - start:.2f}s"
-        return result
-
-    # ═══════════════════════════════════════════════════════════════
-    # DEBUG — Grok solo (2M context scans everything)
-    # ═══════════════════════════════════════════════════════════════
-    if task_type == 'debug':
-        text, tok = call_model('grok',
-            "Lead debugger. 2M context. Find the root cause. Show the fix. Code first.",
-            user_message, max_tokens=1500)
-        result['response'] = text or "Could not diagnose."
-        _track(result, 'Grok', text, tok)
-        result['processing_time'] = f"{time.time() - start:.2f}s"
-        return result
-
-    # ═══════════════════════════════════════════════════════════════
-    # RESEARCH — DeepSeek solo (cheapest paid)
-    # ═══════════════════════════════════════════════════════════════
-    if task_type == 'research':
-        text, tok = call_model('deepseek',
-            "Researcher. Technical analysis, comparisons, reasoning. Concise.",
-            user_message, max_tokens=1500)
-        result['response'] = text or "Research failed."
-        _track(result, 'DeepSeek', text, tok)
-        result['processing_time'] = f"{time.time() - start:.2f}s"
-        return result
-
-    # ═══════════════════════════════════════════════════════════════
-    # QUICK CODE — Grok solo (small utility, not a full project)
-    # ═══════════════════════════════════════════════════════════════
-    if task_type == 'quick_code':
-        text, tok = call_model('grok',
-            "Rapid prototyper. Write the code immediately. Minimal prose. Production-ready.",
-            user_message, max_tokens=1500)
-        result['response'] = text or "Code generation failed."
-        _track(result, 'Grok', text, tok)
-        result['processing_time'] = f"{time.time() - start:.2f}s"
-        return result
-
-    # ═══════════════════════════════════════════════════════════════
-    # BUILD — Full 6-stage pipeline
-    # ═══════════════════════════════════════════════════════════════
-    logger.info(f"[BUILD] Starting full staged pipeline for: {user_message[:100]}...")
-    result['stage_detail'] = []  # Per-call telemetry for verification
-
     def _timed_call(label, model_key, system_prompt, user_msg, max_tok=None):
-        """Call a model and record timing + response preview for telemetry."""
+        """Call a model and record timing + token telemetry."""
         t0 = time.time()
         text, tok = call_model(model_key, system_prompt, user_msg, max_tok)
         elapsed = time.time() - t0
@@ -360,81 +287,141 @@ def run_pipeline(user_message):
             'tokens': tok if isinstance(tok, dict) else {},
             'preview': (text[:150] + '...') if text and len(text) > 150 else (text or 'FAILED'),
         })
-        logger.info(f"[BUILD] {label}: {elapsed:.1f}s, {len(text) if text else 0} chars")
+        logger.info(f"[PIPELINE] {label}: {elapsed:.1f}s, {len(text) if text else 0} chars")
         return text, tok
 
-    # ── STAGE 1: Gemma intake (FREE) — no tokens wasted ──
-    result['stages'].append('intake')
-    logger.info("[BUILD] Stage 1: Intake (Gemma)")
+    # ═══════════════════════════════════════════════════════════════
+    # LARGE INPUT (>500 words) — Grok ingests with 2M context
+    # ═══════════════════════════════════════════════════════════════
+    if words > 500 and not build_gate:
+        result['task_type'] = 'large_input'
+        result['stages'].append('grok_ingest')
+        text, tok = _timed_call('Grok (2M ingest)', 'grok',
+            "Analyze this large input. Structured summary + action plan. Be thorough but concise.",
+            user_message, 2048)
+        result['response'] = text or "Failed to process large input."
+        result['processing_time'] = f"{time.time() - start:.2f}s"
+        return result
 
-    # ── STAGE 2: Opus architects → DeepSeek validates ──
+    # ═══════════════════════════════════════════════════════════════
+    # DEBUG PATH — Grok solo (surgical debugging)
+    # ═══════════════════════════════════════════════════════════════
+    if is_debug and not build_gate:
+        result['task_type'] = 'debug'
+        result['stages'].append('grok_debug')
+        text, tok = _timed_call('Grok (debugger)', 'grok',
+            "Lead debugger. 2M context window. Find the root cause. Show the fix. "
+            "Code-first. Surgical — don't rewrite everything, just fix what's broken.",
+            user_message, 2048)
+        result['response'] = text or "Could not diagnose."
+        result['processing_time'] = f"{time.time() - start:.2f}s"
+        return result
+
+    # ═══════════════════════════════════════════════════════════════
+    # DEFAULT PATH — Gemma → DeepSeek Chat → Gemma (CHEAP + FAST)
+    # No build/deploy/create in first 10 tokens = no frontier models
+    # ═══════════════════════════════════════════════════════════════
+    if not build_gate:
+        result['task_type'] = 'fast_path'
+        result['stages'].append('deepseek_reply')
+        logger.info(f"[FAST-PATH] No build gate triggered. DeepSeek handles directly.")
+
+        # DeepSeek Chat V3 handles it — cheapest paid model
+        ds_text, ds_tok = _timed_call('DeepSeek V3 (fast reply)', 'deepseek_chat',
+            "You are the Leviathan dev team's research and reasoning engine. "
+            "Answer the user's question directly, concisely, and accurately. "
+            "If it's a technical question, give a technical answer. "
+            "If it's casual, be brief and helpful. Do NOT suggest building anything unless asked.",
+            user_message, 1500)
+
+        if not ds_text:
+            # Fallback to Gemma if DeepSeek fails
+            ds_text, ds_tok = call_model('gemma',
+                "Answer directly and concisely.", user_message, 800)
+            result['models_used'].append('Gemma 3 (fallback)')
+
+        result['response'] = ds_text or "I'm here. What do you need?"
+        result['processing_time'] = f"{time.time() - start:.2f}s"
+        return result
+
+    # ═══════════════════════════════════════════════════════════════
+    # BUILD PATH — Full staged pipeline (build/deploy/create detected)
+    # ═══════════════════════════════════════════════════════════════
+    result['task_type'] = 'build'
+    logger.info(f"[BUILD] *** FULL PIPELINE TRIGGERED *** for: {user_message[:100]}...")
+
+    MAX_FIX_ROUNDS = 2  # Max verification-fix loops before shipping
+
+    # ── STAGE 1: DeepSeek R1 generates master prompt for Opus ──
+    result['stages'].append('master_prompt')
+    logger.info("[BUILD] Stage 1: DeepSeek R1 generates master architecture prompt")
+
+    master_prompt, _ = _timed_call('DeepSeek R1 (master prompt)', 'deepseek_reason',
+        "You are the master prompt engineer. The user wants to BUILD something. "
+        "Your job: analyze the user's request and generate a DETAILED master prompt "
+        "for a systems architect (Claude Opus 4.6). The master prompt must include:\n"
+        "- Clear problem statement\n"
+        "- Technical requirements extracted from user intent\n"
+        "- Constraints and edge cases to consider\n"
+        "- Performance/scalability requirements\n"
+        "- Security considerations\n"
+        "- Deployment target (if mentioned)\n\n"
+        "Output ONLY the master prompt. No preamble. The architect will receive it directly.",
+        user_message, 2048)
+
+    if not master_prompt:
+        master_prompt = user_message  # Fallback: raw user input goes to Opus
+
+    # ── STAGE 2: Opus designs architecture from master prompt ──
     result['stages'].append('architecture')
-    logger.info("[BUILD] Stage 2: Architecture (Opus → DeepSeek → Opus)")
+    logger.info("[BUILD] Stage 2: Opus architects from DeepSeek's master prompt")
 
-    # 2a: Opus generates architecture
     arch_text, _ = _timed_call('Opus (architecture)', 'opus',
-        "You are the system architect. The user has an idea. Design a complete software architecture:\n"
+        "You are the systems architect. Design a complete software architecture from this prompt.\n"
+        "Output a structured blueprint with:\n"
         "- Components, modules, data flow\n"
         "- Tech stack choices with reasoning\n"
-        "- File structure\n"
-        "- API contracts / interfaces\n"
+        "- Complete file structure\n"
+        "- API contracts / interfaces / data models\n"
         "- Security considerations\n"
-        "- Deployment strategy\n"
-        "Output a structured blueprint that an engineer can immediately build from.",
-        user_message, 1500)
+        "- Deployment strategy\n\n"
+        "This goes directly to engineers. Make it actionable: file names, function signatures, "
+        "data models, API routes. Zero ambiguity.",
+        master_prompt, 2048)
 
     if not arch_text:
         result['response'] = "Architecture stage failed. Opus did not respond."
         result['processing_time'] = f"{time.time() - start:.2f}s"
         return result
 
-    # 2b: DeepSeek validates and improves the architecture
-    validation_text, _ = _timed_call('DeepSeek (validation)', 'deepseek',
-        "You are the validation engine. Review this software architecture for blind spots, "
-        "scalability issues, missing edge cases, and potential improvements. "
-        "If the architecture is solid, explain WHY it's solid so the architect can be confident. "
-        "If it needs changes, be specific about what to fix and why.",
-        f"ORIGINAL USER REQUEST:\n{user_message}\n\nPROPOSED ARCHITECTURE:\n{arch_text}",
-        1500)
+    final_arch = arch_text
 
-    # 2c: Opus finalizes architecture incorporating DeepSeek feedback
-    final_arch, _ = _timed_call('Opus (finalized)', 'opus',
-        "You are the system architect. You received validation feedback on your design. "
-        "Incorporate any valid improvements. Output the FINAL architecture blueprint — "
-        "this goes directly to the engineer. Make it actionable: file names, function signatures, "
-        "data models, API routes. No ambiguity.",
-        f"YOUR ORIGINAL ARCHITECTURE:\n{arch_text}\n\nVALIDATION FEEDBACK:\n{validation_text or 'No feedback — architecture approved.'}",
-        1500)
-
-    if not final_arch:
-        final_arch = arch_text  # Fallback to original if finalization failed
-
-    # ── STAGE 3: Grok rapid-prototypes from blueprints (PARALLEL WORKERS) ──
+    # ── STAGE 3: Grok rapid-prototypes (PARALLEL WORKERS) ──
     result['stages'].append('prototype')
-    logger.info("[BUILD] Stage 3: Rapid Prototype (Grok x2 parallel)")
+    logger.info("[BUILD] Stage 3: Grok x2 parallel rapid prototype")
     stage3_start = time.time()
 
     grok_futures = {
         executor.submit(call_model, 'grok',
             "Rapid prototyper. Write the BACKEND code from this blueprint. "
-            "Server, API routes, data models, business logic, database. "
-            "Every file, every function. Code first. No filler.",
-            f"USER IDEA:\n{user_message}\n\nARCHITECTURE BLUEPRINT:\n{final_arch}\n\nFOCUS: Backend / server-side code only.",
-            1500): 'backend',
+            "Server, API routes, data models, business logic, database schema. "
+            "Every file, every function. Complete, runnable code. No prose filler.",
+            f"USER REQUEST:\n{user_message}\n\nARCHITECTURE BLUEPRINT:\n{final_arch}\n\nFOCUS: Backend / server-side code only.",
+            4096): 'backend',
         executor.submit(call_model, 'grok',
             "Rapid prototyper. Write the FRONTEND/CLI/client code from this blueprint. "
-            "UI, client logic, config files, Dockerfile, README, setup scripts. "
-            "Every file, every function. Code first. No filler.",
-            f"USER IDEA:\n{user_message}\n\nARCHITECTURE BLUEPRINT:\n{final_arch}\n\nFOCUS: Frontend / client / config / deployment files only.",
-            1500): 'frontend',
+            "UI, client logic, config files, Dockerfile, README, setup scripts, CI/CD. "
+            "Every file, every function. Complete, runnable code. No prose filler.",
+            f"USER REQUEST:\n{user_message}\n\nARCHITECTURE BLUEPRINT:\n{final_arch}\n\nFOCUS: Frontend / client / config / deployment files only.",
+            4096): 'frontend',
     }
 
     prototype_parts = {}
     grok_timings = {}
-    for future in as_completed(grok_futures, timeout=60):
+    for future in as_completed(grok_futures, timeout=120):
         part_name = grok_futures[future]
         try:
-            text, tok = future.result(timeout=3)
+            text, tok = future.result(timeout=5)
             elapsed = time.time() - stage3_start
             if text:
                 prototype_parts[part_name] = text
@@ -446,58 +433,44 @@ def run_pipeline(user_message):
                     'time': f"{elapsed:.2f}s",
                     'chars': len(text),
                     'tokens': tok if isinstance(tok, dict) else {},
-                    'preview': (text[:150] + '...') if len(text) > 150 else text,
                 })
                 logger.info(f"[BUILD] Grok ({part_name}): {elapsed:.1f}s, {len(text)} chars")
         except Exception as e:
             logger.warning(f"[Grok {part_name}] failed: {e}")
-
-    # Record parallel proof: if both finished within similar time, they ran in parallel
-    if len(grok_timings) == 2:
-        stage3_wall = time.time() - stage3_start
-        result['stage_detail'].append({
-            'agent': 'PARALLEL PROOF (Grok)',
-            'wall_time': f"{stage3_wall:.2f}s",
-            'backend_done_at': f"{grok_timings.get('backend', 0):.2f}s",
-            'frontend_done_at': f"{grok_timings.get('frontend', 0):.2f}s",
-            'parallel': stage3_wall < (grok_timings.get('backend', 0) + grok_timings.get('frontend', 0)) * 0.8,
-        })
 
     if not prototype_parts:
         result['response'] = f"Architecture complete but prototype failed.\n\nARCHITECTURE:\n{final_arch}"
         result['processing_time'] = f"{time.time() - start:.2f}s"
         return result
 
-    prototype_text = "\n\n--- BACKEND ---\n".join(
-        [prototype_parts.get('backend', ''), "--- FRONTEND/CONFIG ---\n" + prototype_parts.get('frontend', '')]
-    ).strip()
-
     # ── STAGE 4: Codex production-hardens (PARALLEL WORKERS) ──
     result['stages'].append('production')
-    logger.info("[BUILD] Stage 4: Production Hardening (Codex x2 parallel)")
+    logger.info("[BUILD] Stage 4: Codex x2 parallel production hardening")
     stage4_start = time.time()
 
     codex_futures = {
         executor.submit(call_model, 'codex',
             "Production engineer. Overhaul this BACKEND prototype into production-grade code. "
-            "Error handling, input validation, type safety, security hardening, "
-            "clean imports, no dead code. Output COMPLETE production backend code.",
+            "Full error handling, input validation, type safety, security hardening, "
+            "logging, clean imports, no dead code, proper documentation. "
+            "Output COMPLETE, production-ready backend code. Every file, every line.",
             f"ARCHITECTURE:\n{final_arch}\n\nBACKEND PROTOTYPE:\n{prototype_parts.get('backend', 'N/A')}",
-            1500): 'backend',
+            4096): 'backend',
         executor.submit(call_model, 'codex',
             "Production engineer. Overhaul this FRONTEND/CONFIG prototype into production-grade code. "
-            "Error handling, edge cases, security, clean README with setup instructions, "
-            "proper Dockerfile, CI config. Output COMPLETE production frontend/config code.",
+            "Full error handling, edge cases, security, clean README with setup instructions, "
+            "proper Dockerfile, CI config, environment management. "
+            "Output COMPLETE, production-ready frontend/config code. Every file, every line.",
             f"ARCHITECTURE:\n{final_arch}\n\nFRONTEND/CONFIG PROTOTYPE:\n{prototype_parts.get('frontend', 'N/A')}",
-            1500): 'frontend',
+            4096): 'frontend',
     }
 
     production_parts = {}
     codex_timings = {}
-    for future in as_completed(codex_futures, timeout=60):
+    for future in as_completed(codex_futures, timeout=120):
         part_name = codex_futures[future]
         try:
-            text, tok = future.result(timeout=3)
+            text, tok = future.result(timeout=5)
             elapsed = time.time() - stage4_start
             if text:
                 production_parts[part_name] = text
@@ -509,22 +482,10 @@ def run_pipeline(user_message):
                     'time': f"{elapsed:.2f}s",
                     'chars': len(text),
                     'tokens': tok if isinstance(tok, dict) else {},
-                    'preview': (text[:150] + '...') if len(text) > 150 else text,
                 })
                 logger.info(f"[BUILD] Codex ({part_name}): {elapsed:.1f}s, {len(text)} chars")
         except Exception as e:
             logger.warning(f"[Codex {part_name}] failed: {e}")
-
-    # Record parallel proof for Codex
-    if len(codex_timings) == 2:
-        stage4_wall = time.time() - stage4_start
-        result['stage_detail'].append({
-            'agent': 'PARALLEL PROOF (Codex)',
-            'wall_time': f"{stage4_wall:.2f}s",
-            'backend_done_at': f"{codex_timings.get('backend', 0):.2f}s",
-            'frontend_done_at': f"{codex_timings.get('frontend', 0):.2f}s",
-            'parallel': stage4_wall < (codex_timings.get('backend', 0) + codex_timings.get('frontend', 0)) * 0.8,
-        })
 
     production_text = "\n\n".join(
         [production_parts.get('backend', prototype_parts.get('backend', '')),
@@ -532,39 +493,82 @@ def run_pipeline(user_message):
     ).strip()
 
     if not production_parts:
-        production_text = prototype_text  # Fallback to prototype
+        production_text = "\n\n".join(prototype_parts.values()).strip()
 
-    # ── STAGE 5: Opus final review ──
-    result['stages'].append('review')
-    logger.info("[BUILD] Stage 5: Final Review (Opus)")
+    # ── STAGE 5: DeepSeek R1 verification loop ──
+    result['stages'].append('verification')
+    logger.info("[BUILD] Stage 5: DeepSeek R1 verification")
 
-    review_text, _ = _timed_call('Opus (review)', 'opus',
-        "Final review. You are the architect reviewing the production code against your blueprint. "
-        "Check: does it match the architecture? Any gaps? Security issues? Missing features? "
-        "If APPROVED: say 'APPROVED' and list why it's ready. "
-        "If NEEDS WORK: list specific issues that must be fixed. Be brief.",
-        f"ARCHITECTURE:\n{final_arch}\n\nPRODUCTION CODE:\n{production_text}",
-        1000)
+    for fix_round in range(MAX_FIX_ROUNDS + 1):
+        verify_text, _ = _timed_call(f'DeepSeek R1 (verify round {fix_round})', 'deepseek_reason',
+            "You are the quality verification engine. You generated the original master prompt. "
+            "Now review the finished production code against the user's request.\n\n"
+            "VERDICT OPTIONS:\n"
+            "- If the code is A+ quality and satisfies the request: respond with EXACTLY 'APPROVED' on the first line, "
+            "  followed by a brief explanation of why it's ready.\n"
+            "- If the code needs fixes: respond with EXACTLY 'FIX_NEEDED' on the first line, "
+            "  followed by a DETAILED fix prompt that specifies exactly what's wrong and how to fix it. "
+            "  This fix prompt will go to the architect to redesign the failing parts.",
+            f"ORIGINAL USER REQUEST:\n{user_message}\n\n"
+            f"MASTER PROMPT GENERATED:\n{master_prompt}\n\n"
+            f"ARCHITECTURE:\n{final_arch}\n\n"
+            f"PRODUCTION CODE:\n{production_text[:8000]}",  # Cap context to avoid blowout
+            2048)
+
+        if not verify_text or 'APPROVED' in (verify_text or '').upper().split('\n')[0]:
+            logger.info(f"[BUILD] DeepSeek R1 APPROVED at round {fix_round}")
+            break
+
+        if 'FIX_NEEDED' in verify_text.upper().split('\n')[0] and fix_round < MAX_FIX_ROUNDS:
+            logger.info(f"[BUILD] FIX ROUND {fix_round + 1}: DeepSeek flagged issues, sending to Opus→Grok→Codex")
+            result['stages'].append(f'fix_round_{fix_round + 1}')
+
+            # Opus re-architects the fix
+            fix_arch, _ = _timed_call(f'Opus (fix arch r{fix_round+1})', 'opus',
+                "The code reviewer found issues. Re-architect ONLY the parts that need fixing. "
+                "Output a targeted fix blueprint — what files to change, what functions to modify, "
+                "what to add/remove. Be surgical, don't redo everything.",
+                f"VERIFICATION FEEDBACK:\n{verify_text}\n\nCURRENT ARCHITECTURE:\n{final_arch}",
+                1500)
+
+            # Grok implements the fix
+            fix_code, _ = _timed_call(f'Grok (fix impl r{fix_round+1})', 'grok',
+                "Implement ONLY the fixes described. Don't rewrite unrelated code. Surgical fix.",
+                f"FIX BLUEPRINT:\n{fix_arch or verify_text}\n\nCURRENT CODE:\n{production_text[:6000]}",
+                4096)
+
+            # Codex hardens the fix
+            if fix_code:
+                hardened_fix, _ = _timed_call(f'Codex (fix harden r{fix_round+1})', 'codex',
+                    "Production-harden this fix. Error handling, edge cases, security. "
+                    "Output the COMPLETE updated code incorporating the fix.",
+                    f"ARCHITECTURE:\n{final_arch}\n\nFIX CODE:\n{fix_code}\n\nPREVIOUS PRODUCTION CODE:\n{production_text[:6000]}",
+                    4096)
+                if hardened_fix:
+                    production_text = hardened_fix
+        else:
+            break  # Either approved or max rounds hit
 
     # ── STAGE 6: Gemma presents to user (FREE) ──
     result['stages'].append('delivery')
     logger.info("[BUILD] Stage 6: Delivery (Gemma)")
 
     delivery_text, del_tok = call_model('gemma',
-        "You are presenting the dev team's completed work to the user. "
-        "Structure your response:\n"
+        "Present the dev team's completed work to the user.\n"
+        "Structure:\n"
         "1. Brief summary of what was built\n"
-        "2. The complete production code (keep ALL code blocks intact)\n"
+        "2. The COMPLETE production code (keep ALL code blocks intact — do not truncate)\n"
         "3. Setup/install instructions\n"
-        "4. The architect's review verdict\n"
-        "Keep it clean and organized. The user should be able to copy-paste and run.",
+        "4. Verification status\n"
+        "Keep it clean. User should be able to copy-paste and run.",
         f"USER REQUEST:\n{user_message}\n\n"
         f"PRODUCTION CODE:\n{production_text}\n\n"
-        f"ARCHITECT REVIEW:\n{review_text or 'Approved.'}",
+        f"VERIFICATION: {verify_text[:500] if verify_text else 'Approved'}",
         max_tokens=1500)
 
     result['response'] = delivery_text or production_text
     result['processing_time'] = f"{time.time() - start:.2f}s"
+    result['fix_rounds'] = fix_round if 'fix_round' in dir() else 0
     return result
 
 
@@ -586,13 +590,13 @@ def api_chat():
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'healthy', 'version': '5.0-staged', 'timestamp': datetime.now().isoformat()})
+    return jsonify({'status': 'healthy', 'version': '5.2-gated', 'timestamp': datetime.now().isoformat()})
 
 
 @app.route('/status')
 def status():
     return jsonify({
-        'version': '5.0-staged',
+        'version': '5.2-gated',
         'architecture': 'Gemma bridge + paid model execution',
         'models': {k: {'name': v['name'], 'role': v['role'], 'cost': v['cost']} for k, v in MODELS.items()},
         'api_keys': {k: bool(v) for k, v in API_KEYS.items()},
@@ -782,7 +786,7 @@ start_discord_bot()
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
-    logger.info(f"Super Brain Dev Team v5.0 starting on :{port}")
+    logger.info(f"Super Brain Dev Team v5.2 starting on :{port}")
     logger.info(f"Models: Gemma (bridge) + Grok + Codex + Opus + DeepSeek")
     logger.info(f"Discord: {'enabled' if DISCORD_TOKEN else 'disabled (no token)'}")
     app.run(host='0.0.0.0', port=port)
