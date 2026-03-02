@@ -820,8 +820,58 @@ def start_discord_bot():
     intents = discord.Intents.default()
     intents.message_content = True
     bot = discord.Client(intents=intents)
+    tree = discord.app_commands.CommandTree(bot)
     discord_bot = bot
 
+    target_guild = discord.Object(id=DISCORD_GUILD_ID)
+
+    # ── Helper: send a long response, chunked if needed ──
+    async def _send_response(send_func, followup_func, text):
+        """Send text, chunking at 2000 chars if needed."""
+        if len(text) <= 2000:
+            await send_func(text)
+        else:
+            chunks = []
+            remaining = text
+            while remaining:
+                if len(remaining) <= 2000:
+                    chunks.append(remaining)
+                    break
+                split_at = remaining.rfind('\n', 0, 1990)
+                if split_at < 500:
+                    split_at = 1990
+                chunks.append(remaining[:split_at])
+                remaining = remaining[split_at:].lstrip()
+            await send_func(chunks[0])
+            for chunk in chunks[1:]:
+                await followup_func(chunk)
+
+    # ── /build slash command ──────────────────────────────────
+    @tree.command(name="build", description="Activate the full dev pipeline (DeepSeek R1 → Opus → Grok → Codex → verification)", guild=target_guild)
+    @discord.app_commands.describe(task="What do you want the dev team to build?")
+    async def build_command(interaction: discord.Interaction, task: str):
+        # Defer immediately — builds take a long time
+        await interaction.response.defer()
+        loop = asyncio.get_event_loop()
+        try:
+            # Force build gate by prepending /build
+            result = await loop.run_in_executor(None, run_pipeline, f"/build {task}")
+            response_text = result.get('response', 'No response generated.')
+            models = result.get('models_used', [])
+            proc_time = result.get('processing_time', '?')
+            footer = f"\n-# {' · '.join(models)} · {proc_time}" if models else ""
+            full_response = response_text + footer
+
+            await _send_response(
+                interaction.followup.send,
+                interaction.followup.send,
+                full_response
+            )
+        except Exception as e:
+            logger.error(f"Discord /build error: {e}", exc_info=True)
+            await interaction.followup.send(f"Build failed: {str(e)[:500]}")
+
+    # ── Sync slash commands on ready ──────────────────────────
     @bot.event
     async def on_ready():
         logger.info(f"Discord bot connected as {bot.user} (ID: {bot.user.id})")
@@ -831,9 +881,16 @@ def start_discord_bot():
         else:
             logger.warning(f"Guild {DISCORD_GUILD_ID} not found — bot may not be invited yet")
 
+        # Sync slash commands to guild (instant, no 1-hour global cache)
+        try:
+            synced = await tree.sync(guild=target_guild)
+            logger.info(f"Synced {len(synced)} slash command(s) to guild {DISCORD_GUILD_ID}")
+        except Exception as e:
+            logger.error(f"Failed to sync slash commands: {e}", exc_info=True)
+
+    # ── Regular messages → fast path only (no build) ──────────
     @bot.event
     async def on_message(message):
-        # Ignore own messages
         if message.author == bot.user:
             return
 
@@ -845,50 +902,27 @@ def start_discord_bot():
             content = content[5:].strip()
 
         if not content:
-            await message.reply("What do you need? Send me a message and the dev team will handle it.")
             return
 
-        # Show typing while processing
+        # Regular messages always go through fast path (never build)
         async with message.channel.typing():
-            # Run pipeline in thread pool (it uses blocking requests)
             loop = asyncio.get_event_loop()
             try:
                 result = await loop.run_in_executor(None, run_pipeline, content)
                 response_text = result.get('response', 'No response generated.')
                 models = result.get('models_used', [])
                 proc_time = result.get('processing_time', '?')
-
-                # Build footer
                 footer = f"\n-# {' · '.join(models)} · {proc_time}" if models else ""
-
                 full_response = response_text + footer
 
-                # Discord max is 2000 chars — chunk if needed
-                if len(full_response) <= 2000:
-                    await message.reply(full_response)
-                else:
-                    # Send in chunks, reply first, then follow-up
-                    chunks = []
-                    while full_response:
-                        if len(full_response) <= 2000:
-                            chunks.append(full_response)
-                            break
-                        # Find a good split point
-                        split_at = full_response.rfind('\n', 0, 1990)
-                        if split_at < 500:
-                            split_at = 1990
-                        chunks.append(full_response[:split_at])
-                        full_response = full_response[split_at:].lstrip()
-
-                    for i, chunk in enumerate(chunks):
-                        if i == 0:
-                            await message.reply(chunk)
-                        else:
-                            await message.channel.send(chunk)
-
+                await _send_response(
+                    message.reply,
+                    message.channel.send,
+                    full_response
+                )
             except Exception as e:
                 logger.error(f"Discord pipeline error: {e}", exc_info=True)
-                await message.reply(f"Error processing your request: {str(e)[:200]}")
+                await message.reply(f"Error: {str(e)[:200]}")
 
     def _run_bot():
         loop = asyncio.new_event_loop()
