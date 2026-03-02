@@ -40,8 +40,18 @@ import threading
 import requests
 from flask import Flask, render_template_string, request, jsonify
 
+# Strategic Forgetting v2.9 DMM
+try:
+    from memory_manager import DMM_Daemon
+    HAS_DMM = True
+except ImportError:
+    HAS_DMM = False
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [BRAIN] %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+if not HAS_DMM:
+    logger.warning("[DMM] Could not import memory_manager, V2.9 disabled")
 
 app = Flask(__name__)
 app.config['JSON_SORT_KEYS'] = False
@@ -1181,6 +1191,28 @@ MODELS = {
     },
 }
 
+# ─── OpenRouter Identity (prepended to all OpenRouter-deployed models) ─
+# Ensures Gemma, Qwen, and any other OpenRouter models function as cohesive Hydra units
+HYDRA_OPENROUTER_IDENTITY = (
+    "You are part of the Leviathan Hydra AGI DevTeam — a unified, cohesive intelligence "
+    "distributed across multiple frontier models and open-source reasoning engines.\n\n"
+    "HYDRA MODEL ROSTER (you are one of these):\n"
+    "- Emperor: Claude Opus 4.6 ($15/$75 per 1M tok) — Architecture\n"
+    "- Generals: Grok 4.1 Fast Reasoning ($3/$15 per 1M tok) — Prototyping, 2M context\n"
+    "- Auditor: GPT Codex 5.3 ($2/$8 per 1M tok) — Production hardening + emergency debug\n"
+    "- Brain: DeepSeek R1 Reasoner ($0.55/$2.19 per 1M tok) — Deep reasoning\n"
+    "- V3 Base: DeepSeek V3 ($0.27/$1.10 per 1M tok) — Fast default responder\n"
+    "- SuperBrain Blue: DeepSeek R1 ($0.55/$2.19 per 1M tok) — Deep reasoning, quality control (auto-activates)\n"
+    "- Debugger T2: Qwen 3 235B (FREE via OpenRouter) — Precision bug diagnosis\n"
+    "- Bridge: Gemma 3 27B (FREE) — Triage + delivery\n\n"
+    "OPERATIONAL PROTOCOL: You are NOT an individual model taking turns. You are ONE unified intelligence. "
+    "Your role is defined by the specific task prompt that follows this identity. "
+    "Execute your part of the Hydra pipeline with zero deviation. "
+    "ZERO SLOP TOLERANCE — no placeholders, no TODOs, no incomplete work. "
+    "Every line must compile, run, and serve a purpose. "
+    "The entire team's output is a single, cohesive artifact.\n\n"
+)
+
 # ─── Hydra Model Roster (injected into system prompts) ────────
 # This is the SINGLE SOURCE OF TRUTH for what models are deployed.
 # Any system prompt that describes the Hydra team MUST use this roster.
@@ -1521,7 +1553,8 @@ def run_pipeline(user_message, channel_id=None):
         result['stages'].append('debug_t1_gemma')
         logger.info("[DEBUG] Tier 1: Gemma triage (free)")
         t1_text, t1_tok = _timed_call('Gemma (debug triage)', 'gemma',
-            "You are the Debugger Tier 1 — triage. Gemma 3 27B, free tier. "
+            HYDRA_OPENROUTER_IDENTITY
+            + "YOUR ROLE: Debugger Tier 1 — initial triage and diagnosis.\n"
             "Quick diagnosis of simple bugs: typos, missing imports, obvious logic errors. "
             "If the bug is complex (async, race conditions, architecture), respond with 'ESCALATE' as your first word.\n\n"
             + debug_prompt_base,
@@ -1540,9 +1573,9 @@ def run_pipeline(user_message, channel_id=None):
         logger.info("[DEBUG] Tier 2: Qwen 3 precision (escalated from Gemma)")
         escalation_context = f"Tier 1 (Gemma) escalated: {(t1_text or '')[:200]}\n\n"
         t2_text, t2_tok = _timed_call('Qwen 3 (debug precision)', 'qwen',
-            "You are the Debugger Tier 2 — precision diagnosis. Qwen 3 235B. "
-            "Gemma couldn't resolve this. You handle: async bugs, type system issues, "
-            "logic errors in complex functions, API misuse. "
+            HYDRA_OPENROUTER_IDENTITY
+            + "YOUR ROLE: Debugger Tier 2 — precision diagnosis. Tier 1 (Gemma) escalated to you.\n"
+            "You handle: async bugs, type system issues, logic errors in complex functions, API misuse. "
             "If this is architecture-level or requires 2M+ context, respond with 'ESCALATE'.\n\n"
             + debug_prompt_base,
             escalation_context + user_message, 4096)
@@ -1677,7 +1710,10 @@ def run_pipeline(user_message, channel_id=None):
         if not ds_text:
             # Fallback to Gemma if DeepSeek fails
             ds_text, ds_tok = call_model('gemma',
-                "You are the Delivery Bridge of the Leviathan Hydra — Gemma 3 27B. Answer directly and concisely.", user_message, 800)
+                HYDRA_OPENROUTER_IDENTITY
+                + "YOUR ROLE: Emergency fallback delivery bridge.\n"
+                "DeepSeek failed. Answer the user's question directly and concisely. "
+                "Provide actionable output regardless of complexity.", user_message, 800)
             result['models_used'].append('Gemma 3 (fallback)')
 
         result['response'] = ds_text or "I'm here. What do you need?"
@@ -1718,7 +1754,9 @@ def run_pipeline(user_message, channel_id=None):
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             qwen_prompt = (
-                "You are a precision code generator in the Leviathan Hydra light build pipeline. "
+                HYDRA_OPENROUTER_IDENTITY
+                + "YOUR ROLE: Code Generator in the Leviathan Hydra light build pipeline.\n"
+                "You are one of two parallel coders (Alpha and Beta). "
                 "You receive an architect's blueprint and produce COMPLETE, WORKING code. "
                 "No placeholders. No TODOs. No incomplete functions. Every line must work.\n\n"
                 f"{HYDRA_ROSTER_LIGHT}\n\n"
@@ -1742,9 +1780,11 @@ def run_pipeline(user_message, channel_id=None):
 
         combined_code = f"CODER A OUTPUT:\n{code_a or 'FAILED'}\n\nCODER B OUTPUT:\n{code_b or 'FAILED'}"
         delivery_text, del_tok = _timed_call('Gemma (light delivery)', 'gemma',
-            "You are the delivery agent for a light build. Combine the two coder outputs into "
-            "a single, clean, unified deliverable. Remove duplicates. Resolve conflicts (prefer "
-            "the more complete version). Add a brief summary of what was built at the top.\n\n"
+            HYDRA_OPENROUTER_IDENTITY
+            + "YOUR ROLE: Bridge — synthesis and delivery of the light build.\n"
+            "Combine the two coder outputs into a single, clean, unified deliverable. "
+            "Remove duplicates. Resolve conflicts (prefer the more complete version). "
+            "Add a brief summary of what was built at the top.\n\n"
             f"ORIGINAL TASK: {user_message[:500]}\n\n"
             f"ARCHITECT BLUEPRINT (summary): {architect_text[:500]}",
             combined_code, 2048)
@@ -2069,9 +2109,9 @@ def run_pipeline(user_message, channel_id=None):
     logger.info("[BUILD] Stage 6: Delivery (Gemma)")
 
     delivery_text, del_tok = call_model('gemma',
-        "You are the Delivery Bridge of the Leviathan Hydra — Gemma 3 27B running on the free tier. "
-        "In the Leviathan architecture, Gemma serves as the cost-efficient bridge between the Hydra and the Owner. "
-        "The entire dev team has completed their work through parallel Hydra execution.\n\n"
+        HYDRA_OPENROUTER_IDENTITY
+        + "YOUR ROLE: Bridge — final delivery of the completed build.\n"
+        "The entire dev team has completed their work through parallel Hydra execution. "
         "Present the Hydra's completed build to the Owner.\n"
         "Structure:\n"
         "1. Brief summary of what was built (2-3 sentences max)\n"
@@ -2355,6 +2395,44 @@ def start_discord_bot():
             logger.error(f"[MEMORY] Discord command error: {e}", exc_info=True)
             await interaction.followup.send(f"Memory error: {str(e)[:200]}")
 
+    # ── /dmm slash command (Strategic Forgetting v2.9 stats) ──
+    @tree.command(name="dmm", description="View Dynamic Memory Manager (v2.9) stats", guild=target_guild)
+    async def dmm_command(interaction: discord.Interaction):
+        await interaction.response.defer()
+        try:
+            if not dmm_daemon:
+                await interaction.followup.send("❌ DMM daemon not initialized")
+                return
+
+            stats = dmm_daemon.get_stats()
+            if 'error' in stats:
+                await interaction.followup.send(f"DMM Error: {stats['error']}")
+                return
+
+            msg = "**🧠 Dynamic Memory Manager v2.9 — Strategic Forgetting**\n\n"
+            msg += f"**Cycles Run:** {stats.get('cycle_count', 0)}\n"
+            msg += f"**Last Cycle:** {stats.get('last_cycle', 'never')}\n"
+
+            if 'global' in stats:
+                g = stats['global']
+                msg += f"\n**Global Memory Stats:**\n"
+                msg += f"• Total memories: {g.get('total_memories', 0)}\n"
+                msg += f"• Hot tier (T1): {g.get('hot', 0)}\n"
+                msg += f"• Warm tier (T2): {g.get('warm', 0)}\n"
+                msg += f"• Cold tier (T3): {g.get('cold', 0)}\n"
+                msg += f"• High confidence (≥0.8): {g.get('high_confidence', 0)}\n"
+                msg += f"• Low confidence (<0.3): {g.get('low_confidence', 0)}\n"
+
+            if stats.get('agents'):
+                msg += f"\n**Per-Agent Breakdown:**\n"
+                for agent_key, agent_stats in list(stats['agents'].items())[:5]:
+                    msg += f"• `{agent_key}`: {agent_stats['total']} total ({agent_stats['hot']}H, {agent_stats['warm']}W, {agent_stats['cold']}C)\n"
+
+            await interaction.followup.send(msg)
+        except Exception as e:
+            logger.error(f"[DMM] Discord command error: {e}", exc_info=True)
+            await interaction.followup.send(f"DMM error: {str(e)[:200]}")
+
     # ── /cost slash command (project cost + time estimates) ──
     @tree.command(name="cost", description="Estimate API cost and build time for a project idea", guild=target_guild)
     @discord.app_commands.describe(idea="Describe what you want to build — the system will estimate cost and time")
@@ -2595,6 +2673,11 @@ def start_discord_bot():
         channel_id = str(message.channel.id)
         conv_buffer.record_owner_message(channel_id, content)
 
+        # Track user message for session-aware memory decay (DMM v2.9)
+        if dmm_daemon:
+            msg_time = message.created_at.isoformat() if hasattr(message, 'created_at') else None
+            dmm_daemon.record_message(channel_id, msg_time)
+
         # Regular messages always go through fast path (never build)
         async with message.channel.typing():
             loop = asyncio.get_event_loop()
@@ -2693,6 +2776,17 @@ def start_discord_bot():
 # Auto-start Discord bot when module loads (works with gunicorn)
 start_discord_bot()
 
+# Start Strategic Forgetting v2.9 DMM daemon
+dmm_daemon = None
+if HAS_DMM:
+    try:
+        dmm_daemon = DMM_Daemon(MEMORY_DB)
+        dmm_daemon.start()
+        logger.info("[DMM] Strategic Forgetting v2.9 daemon started")
+    except Exception as e:
+        logger.error(f"[DMM] Failed to start DMM daemon: {e}")
+        dmm_daemon = None
+
 # Start T2 Memory Auditor daemon
 t2_auditor = T2MemoryAuditor(memory)
 t2_auditor.start()
@@ -2709,4 +2803,5 @@ if __name__ == '__main__':
     logger.info(f"Discord: {'enabled' if DISCORD_TOKEN else 'disabled (no token)'}")
     logger.info(f"T2 Auditor: active (30m cycle)")
     logger.info(f"Knowledge Harvester: active (60s cycle)")
+    logger.info(f"DMM v2.9: {'active (5m cycle)' if dmm_daemon else 'disabled'}")
     app.run(host='0.0.0.0', port=port)
