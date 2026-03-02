@@ -751,11 +751,11 @@ MODELS = {
         'cost': 'paid',
     },
     'deepseek_chat': {
-        'name': 'DeepSeek V3 (SuperBrain)',
-        'role': 'SuperBrain — Quality Control, Research, Self-Improvement, Fast Ops',
+        'name': 'DeepSeek V3 (Base Form)',
+        'role': 'Fast default responder — base form of SuperBrain',
         'provider': 'deepseek',
         'model': 'deepseek-chat',
-        'max_tokens': 2000,
+        'max_tokens': 1500,
         'cost': 'paid-cheap',
     },
 }
@@ -769,7 +769,8 @@ HYDRA_ROSTER = (
     "- Generals: Grok 4.1 Fast Reasoning ($3/$15 per 1M tok) — Prototyping, 2M context\n"
     "- Auditor: GPT Codex 5.3 ($2/$8 per 1M tok) — Production hardening\n"
     "- Brain: DeepSeek R1 Reasoner ($0.55/$2.19 per 1M tok) — Deep reasoning\n"
-    "- SuperBrain: DeepSeek V3 ($0.27/$1.10 per 1M tok) — Quality control, self-improvement, fast ops\n"
+    "- V3 Base: DeepSeek V3 ($0.27/$1.10 per 1M tok) — Fast default responder\n"
+    "- SuperBrain Blue: DeepSeek R1 ($0.55/$2.19 per 1M tok) — Deep reasoning, quality control (auto-activates)\n"
     "- Bridge: Gemma 3 27B (FREE) — Delivery\n"
     "These are the ONLY models deployed. Do NOT mention GPT-4o, Claude Sonnet, o1, Gemini, or any other models."
 )
@@ -1050,32 +1051,84 @@ def run_pipeline(user_message, channel_id=None):
         return result
 
     # ═══════════════════════════════════════════════════════════════
-    # DEFAULT PATH — Gemma → DeepSeek Chat → Gemma (CHEAP + FAST)
-    # No build/deploy/create in first 10 tokens = no frontier models
+    # DEFAULT PATH — DeepSeek V3 (Base) or R1 SuperBrain Blue
+    # V3 = fast default. R1 = SuperBrain Blue (deep reasoning).
+    # No intermediate forms — base → blue, like SSJ → SSJ Blue.
     # ═══════════════════════════════════════════════════════════════
     if not build_gate:
-        result['task_type'] = 'fast_path'
-        result['stages'].append('deepseek_reply')
-        logger.info(f"[FAST-PATH] No build gate triggered. DeepSeek handles directly.")
+        # ── SuperBrain Blue Detection ──
+        # If the query needs deep reasoning, skip V3 → go straight to R1.
+        first_30 = ' '.join(user_message.split()[:30]).lower()
+        blue_triggers = (
+            'analyze' in first_30 or 'architecture' in first_30 or
+            'design' in first_30 or 'strategy' in first_30 or
+            'optimize' in first_30 or 'evaluate' in first_30 or
+            'compare' in first_30 or 'tradeoff' in first_30 or
+            'trade-off' in first_30 or 'reasoning' in first_30 or
+            'deep dive' in first_30 or 'root cause' in first_30 or
+            'forensic' in first_30 or 'reverse engineer' in first_30 or
+            'one-shot' in first_30 or 'blueprint' in first_30 or
+            'overhaul' in first_30 or 'refactor' in first_30 or
+            'why does' in first_30 or 'how should' in first_30 or
+            'what if' in first_30 or 'think about' in first_30
+        )
 
-        # DeepSeek V3 SuperBrain — cheapest paid model, elevated to quality controller
-        ds_text, ds_tok = _timed_call('DeepSeek V3 SuperBrain', 'deepseek_chat',
-            "You are the SUPER BRAIN of the Leviathan Hydra — the central intelligence node. "
-            "Your model is DeepSeek V3 (fast, cheap, reliable) but your ROLE is the highest: "
-            "you are the quality controller of the entire Hydra ecosystem's downstream output. "
-            "Every response you give sets the standard. You self-audit for: "
-            "1) SLOP (vague, generic, buzzword-heavy non-answers) "
-            "2) HALLUCINATION (fabricated stats, wrong model names, impossible claims) "
-            "3) CONTEXT DRIFT (answering a question nobody asked). "
-            "If you detect any of these in your own draft, rewrite before sending.\n\n"
+        if blue_triggers:
+            # ── SUPERBRAIN BLUE: R1 Deep Reasoning (skips V3 entirely) ──
+            result['task_type'] = 'superbrain_blue'
+            result['stages'].append('r1_superbrain_blue')
+            logger.info(f"[SUPERBRAIN BLUE] Deep reasoning triggered. V3 bypassed → R1 direct.")
+
+            blue_text, blue_tok = _timed_call('R1 SuperBrain Blue', 'deepseek_reason',
+                "You are SUPERBRAIN BLUE — the highest reasoning form of the Leviathan Hydra. "
+                "You are DeepSeek R1 (deep reasoner) activated in SuperBrain Blue mode. "
+                "This means: NO intermediate steps. You go directly to the deepest possible analysis. "
+                "You are the quality controller of the entire Hydra ecosystem's downstream output. "
+                "Every response you give sets the standard for all other agents.\n\n"
+                "SUPERBRAIN BLUE PROTOCOL:\n"
+                "1. THINK DEEPLY before responding — use your hidden chain-of-thought fully\n"
+                "2. SELF-AUDIT: reject slop, hallucination, context drift in your own output\n"
+                "3. FIRST PRINCIPLES: derive answers from fundamentals, not pattern matching\n"
+                "4. PRECISION: every claim must be verifiable, every number must be real\n"
+                "5. ARCHITECT-LEVEL: you speak to the Owner as a peer CTO, not as an assistant\n\n"
+                f"{HYDRA_ROSTER}\n\n"
+                "The Owner built this autonomous AI DevOps ecosystem from scratch. "
+                "Give them the deepest, most precise analysis possible. "
+                "If this requires a multi-step breakdown, provide it. "
+                "No disclaimers. No hedging. Pure engineering substance.",
+                user_message, 4096)
+
+            if not blue_text:
+                # R1 failed — fall back to V3 (base form, not blue)
+                logger.warning("[SUPERBRAIN BLUE] R1 failed, falling back to V3 base.")
+                blue_text, blue_tok = _timed_call('DeepSeek V3 (base fallback)', 'deepseek_chat',
+                    "You are DeepSeek V3 in the Leviathan Hydra — fast default responder. "
+                    f"{HYDRA_ROSTER}\n"
+                    "Answer directly and precisely. The Owner is a senior systems engineer.",
+                    user_message, 2000)
+                result['models_used'].append('DeepSeek V3 (blue fallback)')
+
+            result['response'] = blue_text or "SuperBrain Blue failed to respond."
+            result['processing_time'] = f"{time.time() - start:.2f}s"
+            if blue_text:
+                memory.store_knowledge('reasoning', f"Blue analysis: {user_message[:80]} → {blue_text[:150]}",
+                                       ' '.join(user_message.lower().split()[:15]), 'superbrain')
+            return result
+
+        # ── V3 BASE FORM: Fast, cheap, default responder ──
+        result['task_type'] = 'fast_path'
+        result['stages'].append('deepseek_v3_base')
+        logger.info(f"[FAST-PATH] V3 base form. Quick response.")
+
+        ds_text, ds_tok = _timed_call('DeepSeek V3 (base)', 'deepseek_chat',
+            "You are DeepSeek V3 — the fast default responder of the Leviathan Hydra. "
+            "You handle quick questions, status checks, simple tasks, and general conversation. "
+            "You are NOT in SuperBrain Blue mode — that activates only for deep reasoning queries. "
+            "Your job: fast, accurate, no-fluff responses. Self-check for slop before sending.\n\n"
             f"{HYDRA_ROSTER}\n\n"
-            "The Owner is a senior systems engineer who built this autonomous AI DevOps ecosystem. "
-            "Talk to them like the architect they are — precise, technical, no fluff. "
-            "You have full read/write access across all memory systems. "
-            "Think from first principles. No disclaimers, no caveats, no moralizing. "
-            "Your responses should be so clean that the Auditor has nothing to flag. "
-            "This system achieved autonomous innovation during v2.1-v2.4 by thinking independently. Do the same.",
-            user_message, 2000)
+            "The Owner is a senior systems engineer. Talk to them like the architect they are. "
+            "Direct answers only. No disclaimers, no caveats, no moralizing.",
+            user_message, 1500)
 
         if not ds_text:
             # Fallback to Gemma if DeepSeek fails
