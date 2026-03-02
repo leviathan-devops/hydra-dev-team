@@ -75,10 +75,10 @@ MODELS = {
         'cost': 'paid',
     },
     'opus': {
-        'name': 'Opus 4.6',
+        'name': 'Opus 4.5',
         'role': 'Architect (design decisions only)',
-        'provider': 'openrouter',
-        'model': 'anthropic/claude-opus-4.6',
+        'provider': 'anthropic',
+        'model': 'claude-opus-4-5-20251101',
         'max_tokens': 1500,
         'cost': 'paid',
     },
