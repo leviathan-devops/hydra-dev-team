@@ -344,6 +344,24 @@ def run_pipeline(user_message):
     # BUILD — Full 6-stage pipeline
     # ═══════════════════════════════════════════════════════════════
     logger.info(f"[BUILD] Starting full staged pipeline for: {user_message[:100]}...")
+    result['stage_detail'] = []  # Per-call telemetry for verification
+
+    def _timed_call(label, model_key, system_prompt, user_msg, max_tok=None):
+        """Call a model and record timing + response preview for telemetry."""
+        t0 = time.time()
+        text, tok = call_model(model_key, system_prompt, user_msg, max_tok)
+        elapsed = time.time() - t0
+        _track(result, label, text, tok)
+        result['stage_detail'].append({
+            'agent': label,
+            'model': MODELS[model_key]['model'],
+            'time': f"{elapsed:.2f}s",
+            'chars': len(text) if text else 0,
+            'tokens': tok if isinstance(tok, dict) else {},
+            'preview': (text[:150] + '...') if text and len(text) > 150 else (text or 'FAILED'),
+        })
+        logger.info(f"[BUILD] {label}: {elapsed:.1f}s, {len(text) if text else 0} chars")
+        return text, tok
 
     # ── STAGE 1: Gemma intake (FREE) — no tokens wasted ──
     result['stages'].append('intake')
@@ -354,7 +372,7 @@ def run_pipeline(user_message):
     logger.info("[BUILD] Stage 2: Architecture (Opus → DeepSeek → Opus)")
 
     # 2a: Opus generates architecture
-    arch_text, arch_tok = call_model('opus',
+    arch_text, _ = _timed_call('Opus (architecture)', 'opus',
         "You are the system architect. The user has an idea. Design a complete software architecture:\n"
         "- Components, modules, data flow\n"
         "- Tech stack choices with reasoning\n"
@@ -363,8 +381,7 @@ def run_pipeline(user_message):
         "- Security considerations\n"
         "- Deployment strategy\n"
         "Output a structured blueprint that an engineer can immediately build from.",
-        user_message, max_tokens=1500)
-    _track(result, 'Opus (architecture)', arch_text, arch_tok)
+        user_message, 1500)
 
     if not arch_text:
         result['response'] = "Architecture stage failed. Opus did not respond."
@@ -372,24 +389,22 @@ def run_pipeline(user_message):
         return result
 
     # 2b: DeepSeek validates and improves the architecture
-    validation_text, val_tok = call_model('deepseek',
+    validation_text, _ = _timed_call('DeepSeek (validation)', 'deepseek',
         "You are the validation engine. Review this software architecture for blind spots, "
         "scalability issues, missing edge cases, and potential improvements. "
         "If the architecture is solid, explain WHY it's solid so the architect can be confident. "
         "If it needs changes, be specific about what to fix and why.",
         f"ORIGINAL USER REQUEST:\n{user_message}\n\nPROPOSED ARCHITECTURE:\n{arch_text}",
-        max_tokens=1500)
-    _track(result, 'DeepSeek (validation)', validation_text, val_tok)
+        1500)
 
     # 2c: Opus finalizes architecture incorporating DeepSeek feedback
-    final_arch, fa_tok = call_model('opus',
+    final_arch, _ = _timed_call('Opus (finalized)', 'opus',
         "You are the system architect. You received validation feedback on your design. "
         "Incorporate any valid improvements. Output the FINAL architecture blueprint — "
         "this goes directly to the engineer. Make it actionable: file names, function signatures, "
         "data models, API routes. No ambiguity.",
         f"YOUR ORIGINAL ARCHITECTURE:\n{arch_text}\n\nVALIDATION FEEDBACK:\n{validation_text or 'No feedback — architecture approved.'}",
-        max_tokens=1500)
-    _track(result, 'Opus (finalized)', final_arch, fa_tok)
+        1500)
 
     if not final_arch:
         final_arch = arch_text  # Fallback to original if finalization failed
@@ -397,8 +412,8 @@ def run_pipeline(user_message):
     # ── STAGE 3: Grok rapid-prototypes from blueprints (PARALLEL WORKERS) ──
     result['stages'].append('prototype')
     logger.info("[BUILD] Stage 3: Rapid Prototype (Grok x2 parallel)")
+    stage3_start = time.time()
 
-    # Split the architecture into frontend/backend or by module for parallel Grok instances
     grok_futures = {
         executor.submit(call_model, 'grok',
             "Rapid prototyper. Write the BACKEND code from this blueprint. "
@@ -415,15 +430,38 @@ def run_pipeline(user_message):
     }
 
     prototype_parts = {}
+    grok_timings = {}
     for future in as_completed(grok_futures, timeout=60):
         part_name = grok_futures[future]
         try:
             text, tok = future.result(timeout=3)
+            elapsed = time.time() - stage3_start
             if text:
                 prototype_parts[part_name] = text
+                grok_timings[part_name] = elapsed
                 _track(result, f'Grok ({part_name})', text, tok)
+                result['stage_detail'].append({
+                    'agent': f'Grok ({part_name})',
+                    'model': MODELS['grok']['model'],
+                    'time': f"{elapsed:.2f}s",
+                    'chars': len(text),
+                    'tokens': tok if isinstance(tok, dict) else {},
+                    'preview': (text[:150] + '...') if len(text) > 150 else text,
+                })
+                logger.info(f"[BUILD] Grok ({part_name}): {elapsed:.1f}s, {len(text)} chars")
         except Exception as e:
             logger.warning(f"[Grok {part_name}] failed: {e}")
+
+    # Record parallel proof: if both finished within similar time, they ran in parallel
+    if len(grok_timings) == 2:
+        stage3_wall = time.time() - stage3_start
+        result['stage_detail'].append({
+            'agent': 'PARALLEL PROOF (Grok)',
+            'wall_time': f"{stage3_wall:.2f}s",
+            'backend_done_at': f"{grok_timings.get('backend', 0):.2f}s",
+            'frontend_done_at': f"{grok_timings.get('frontend', 0):.2f}s",
+            'parallel': stage3_wall < (grok_timings.get('backend', 0) + grok_timings.get('frontend', 0)) * 0.8,
+        })
 
     if not prototype_parts:
         result['response'] = f"Architecture complete but prototype failed.\n\nARCHITECTURE:\n{final_arch}"
@@ -437,6 +475,7 @@ def run_pipeline(user_message):
     # ── STAGE 4: Codex production-hardens (PARALLEL WORKERS) ──
     result['stages'].append('production')
     logger.info("[BUILD] Stage 4: Production Hardening (Codex x2 parallel)")
+    stage4_start = time.time()
 
     codex_futures = {
         executor.submit(call_model, 'codex',
@@ -454,15 +493,38 @@ def run_pipeline(user_message):
     }
 
     production_parts = {}
+    codex_timings = {}
     for future in as_completed(codex_futures, timeout=60):
         part_name = codex_futures[future]
         try:
             text, tok = future.result(timeout=3)
+            elapsed = time.time() - stage4_start
             if text:
                 production_parts[part_name] = text
+                codex_timings[part_name] = elapsed
                 _track(result, f'Codex ({part_name})', text, tok)
+                result['stage_detail'].append({
+                    'agent': f'Codex ({part_name})',
+                    'model': MODELS['codex']['model'],
+                    'time': f"{elapsed:.2f}s",
+                    'chars': len(text),
+                    'tokens': tok if isinstance(tok, dict) else {},
+                    'preview': (text[:150] + '...') if len(text) > 150 else text,
+                })
+                logger.info(f"[BUILD] Codex ({part_name}): {elapsed:.1f}s, {len(text)} chars")
         except Exception as e:
             logger.warning(f"[Codex {part_name}] failed: {e}")
+
+    # Record parallel proof for Codex
+    if len(codex_timings) == 2:
+        stage4_wall = time.time() - stage4_start
+        result['stage_detail'].append({
+            'agent': 'PARALLEL PROOF (Codex)',
+            'wall_time': f"{stage4_wall:.2f}s",
+            'backend_done_at': f"{codex_timings.get('backend', 0):.2f}s",
+            'frontend_done_at': f"{codex_timings.get('frontend', 0):.2f}s",
+            'parallel': stage4_wall < (codex_timings.get('backend', 0) + codex_timings.get('frontend', 0)) * 0.8,
+        })
 
     production_text = "\n\n".join(
         [production_parts.get('backend', prototype_parts.get('backend', '')),
@@ -476,14 +538,13 @@ def run_pipeline(user_message):
     result['stages'].append('review')
     logger.info("[BUILD] Stage 5: Final Review (Opus)")
 
-    review_text, rev_tok = call_model('opus',
+    review_text, _ = _timed_call('Opus (review)', 'opus',
         "Final review. You are the architect reviewing the production code against your blueprint. "
         "Check: does it match the architecture? Any gaps? Security issues? Missing features? "
         "If APPROVED: say 'APPROVED' and list why it's ready. "
         "If NEEDS WORK: list specific issues that must be fixed. Be brief.",
         f"ARCHITECTURE:\n{final_arch}\n\nPRODUCTION CODE:\n{production_text}",
-        max_tokens=1000)
-    _track(result, 'Opus (review)', review_text, rev_tok)
+        1000)
 
     # ── STAGE 6: Gemma presents to user (FREE) ──
     result['stages'].append('delivery')
