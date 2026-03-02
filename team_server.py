@@ -105,8 +105,8 @@ MODELS = {
 API_TIMEOUTS = {
     'openrouter': 30,   # Gemma (free) — fast
     'anthropic': 60,    # Opus — slow but worth the wait for architecture
-    'openai': 45,       # Codex — production hardening takes time
-    'xai': 45,          # Grok — prototyping can be heavy
+    'openai': 90,        # Codex 5.3 — production hardening can be heavy
+    'xai': 90,           # Grok 4.1 reasoning — can take 30-60s for code generation
     'deepseek': 90,     # DeepSeek R1 reasoning can take 40-60s
 }
 
@@ -426,10 +426,10 @@ def run_pipeline(user_message):
 
     prototype_parts = {}
     grok_timings = {}
-    for future in as_completed(grok_futures, timeout=120):
+    for future in as_completed(grok_futures, timeout=180):
         part_name = grok_futures[future]
         try:
-            text, tok = future.result(timeout=5)
+            text, tok = future.result(timeout=120)
             elapsed = time.time() - stage3_start
             if text:
                 prototype_parts[part_name] = text
@@ -475,10 +475,10 @@ def run_pipeline(user_message):
 
     production_parts = {}
     codex_timings = {}
-    for future in as_completed(codex_futures, timeout=120):
+    for future in as_completed(codex_futures, timeout=180):
         part_name = codex_futures[future]
         try:
-            text, tok = future.result(timeout=5)
+            text, tok = future.result(timeout=120)
             elapsed = time.time() - stage4_start
             if text:
                 production_parts[part_name] = text
