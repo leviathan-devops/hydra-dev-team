@@ -294,7 +294,7 @@ class HydraMemory:
 
         # T1 CONVERSATION CONTEXT (last 5 owner messages + bot responses)
         if channel_id:
-            conv_ctx = conv_buffer.get_context(channel_id)
+            conv_ctx = conv_buffer.get_context(channel_id, task_hint=task_hint)
             if conv_ctx:
                 parts.append(conv_ctx)
 
@@ -415,59 +415,147 @@ class HydraMemory:
 memory = HydraMemory()
 
 
-# ─── Conversation Buffer — T1 Short-Term Context ─────────────
-# Stores last 5 Owner messages + bot responses per channel.
-# Injected into system prompt as T1 hot context so the bot
-# remembers what was just said. Lightweight: ~200-500 tokens max.
-# This is a stopgap until Leviathan Vision (v3.1) is implemented.
+# ─── Leviathan Vision — v3.1 Smart Context Engine ─────────────
+# Replaces dumb truncation with keyword-based semantic scanning.
+# Stores full messages in a ring buffer. Extracts keyword fingerprints.
+# On injection: scans fingerprints against current task keywords.
+# Only injects RELEVANT messages. Same 600 char hard cap.
+#
+# Three layers working together:
+#   1. VisionScanner: extracts keyword fingerprints from text blocks
+#   2. ConversationBuffer: stores messages + fingerprints in ring buffer
+#   3. build_context_injection: uses Vision to select what gets injected
+
+# Common English stop words — excluded from keyword extraction
+_STOP_WORDS = frozenset({
+    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+    'should', 'may', 'might', 'can', 'shall', 'to', 'of', 'in', 'for',
+    'on', 'with', 'at', 'by', 'from', 'as', 'into', 'through', 'during',
+    'before', 'after', 'above', 'below', 'between', 'out', 'off', 'over',
+    'under', 'again', 'further', 'then', 'once', 'here', 'there', 'when',
+    'where', 'why', 'how', 'all', 'both', 'each', 'few', 'more', 'most',
+    'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same',
+    'so', 'than', 'too', 'very', 'just', 'because', 'but', 'and', 'or',
+    'if', 'while', 'about', 'up', 'down', 'this', 'that', 'these', 'those',
+    'it', 'its', 'i', 'me', 'my', 'we', 'our', 'you', 'your', 'he', 'she',
+    'him', 'her', 'they', 'them', 'their', 'what', 'which', 'who', 'whom',
+    'much', 'many', 'also', 'like', 'get', 'got', 'know', 'think', 'make',
+    'go', 'going', 'want', 'need', 'use', 'using', 'used', 'give', 'right',
+    'well', 'now', 'way', 'take', 'come', 'see', 'look', 'let', 'say',
+    'thing', 'things', 'still', 'every', 'even', 'back', 'any', 'sure',
+})
+
+
+def extract_keywords(text, max_keywords=5):
+    """Extract top keywords from text. O(N) scan, no external deps.
+    Returns a set of lowercase keyword strings (max 5)."""
+    # Tokenize: split on non-alphanumeric, lowercase
+    words = re.findall(r'[a-z][a-z0-9_]+', text.lower())
+    # Filter stop words and very short words
+    meaningful = [w for w in words if w not in _STOP_WORDS and len(w) > 2]
+    # Count frequency
+    freq = {}
+    for w in meaningful:
+        freq[w] = freq.get(w, 0) + 1
+    # Sort by frequency descending, take top N
+    sorted_words = sorted(freq.items(), key=lambda x: (-x[1], x[0]))
+    return set(w for w, _ in sorted_words[:max_keywords])
+
+
+def keyword_overlap(set_a, set_b):
+    """Jaccard-like overlap score between two keyword sets. Returns 0.0-1.0."""
+    if not set_a or not set_b:
+        return 0.0
+    intersection = len(set_a & set_b)
+    union = len(set_a | set_b)
+    return intersection / union if union > 0 else 0.0
+
 
 class ConversationBuffer:
-    """Per-channel ring buffer for recent Owner messages.
-    ULTRA-COMPACT: Stores only first 80 chars of owner messages,
-    first 60 chars of bot responses. Hard cap: 600 chars total output (~120 tokens).
-    This is a T1 hot context buffer, NOT a full history store.
-    Thread-safe via lock."""
+    """Per-channel ring buffer with Leviathan Vision keyword scanning.
 
-    # Hard budget: max 600 chars output = ~120 tokens. Non-negotiable.
+    Stores last 10 messages (owner + bot) with full text + keyword fingerprints.
+    On context retrieval, scans fingerprints against current task keywords.
+    Only RELEVANT messages get injected. Irrelevant ones are skipped entirely.
+
+    This means we can store MORE messages (10 vs 5) while injecting FEWER tokens,
+    because only the 2-3 messages that actually match the current topic get through.
+
+    Hard cap: 600 chars output (~120 tokens). Non-negotiable."""
+
     MAX_OUTPUT_CHARS = 600
+    RELEVANCE_THRESHOLD = 0.15  # At least 1 keyword overlap out of ~5 = 0.2. Set to 0.15 for slight fuzziness.
 
-    def __init__(self, max_owner_messages=5):
-        self.max_messages = max_owner_messages
-        self.buffers = {}  # channel_id -> deque of {role, content}
+    def __init__(self, max_messages=10):
+        self.max_messages = max_messages
+        self.buffers = {}  # channel_id -> deque of {role, content, keywords, summary}
         self.lock = threading.Lock()
 
     def record_owner_message(self, channel_id, content):
-        """Record an Owner message — compressed to first 80 chars."""
+        """Record an Owner message with keyword fingerprint."""
         with self.lock:
             if channel_id not in self.buffers:
-                self.buffers[channel_id] = deque(maxlen=self.max_messages * 2)
-            # 80 chars max per owner message — just enough to capture intent
-            truncated = content[:80].replace('\n', ' ').strip()
+                self.buffers[channel_id] = deque(maxlen=self.max_messages)
+            keywords = extract_keywords(content, max_keywords=5)
+            # Store full content (for relevant injection) + keywords (for scanning)
+            # Summary = first 80 chars (fallback if full content too long)
+            summary = content[:80].replace('\n', ' ').strip()
             if len(content) > 80:
-                truncated += '…'
-            self.buffers[channel_id].append({'role': 'O', 'content': truncated})
+                summary += '…'
+            self.buffers[channel_id].append({
+                'role': 'O',
+                'content': content,  # Full content stored for selective injection
+                'keywords': keywords,
+                'summary': summary,
+            })
 
     def record_bot_response(self, channel_id, content):
-        """Record a bot response — compressed to first 60 chars (topic continuity only)."""
+        """Record a bot response with keyword fingerprint."""
         with self.lock:
             if channel_id not in self.buffers:
-                self.buffers[channel_id] = deque(maxlen=self.max_messages * 2)
-            # 60 chars max — just enough to know what we said, not reproduce it
-            truncated = content[:60].replace('\n', ' ').strip()
+                self.buffers[channel_id] = deque(maxlen=self.max_messages)
+            keywords = extract_keywords(content, max_keywords=5)
+            summary = content[:60].replace('\n', ' ').strip()
             if len(content) > 60:
-                truncated += '…'
-            self.buffers[channel_id].append({'role': 'B', 'content': truncated})
+                summary += '…'
+            self.buffers[channel_id].append({
+                'role': 'B',
+                'content': content,
+                'keywords': keywords,
+                'summary': summary,
+            })
 
-    def get_context(self, channel_id):
-        """Build an ultra-compact conversation context string.
-        Hard capped at 600 chars (~120 tokens). Returns '' if empty."""
+    def get_context(self, channel_id, task_hint=''):
+        """Build a VISION-SCANNED conversation context string.
+
+        Phase 1: Extract keywords from the current task (task_hint).
+        Phase 2: Scan all buffered messages — compare their keyword fingerprints.
+        Phase 3: Messages with >= 15% keyword overlap get INJECTED (summary only).
+        Phase 4: The MOST RECENT 2 messages always get injected (regardless of relevance)
+                 because immediate conversational continuity matters.
+
+        Hard capped at 600 chars (~120 tokens)."""
         with self.lock:
             buf = self.buffers.get(channel_id)
             if not buf or len(buf) == 0:
                 return ''
+
+            task_keywords = extract_keywords(task_hint, max_keywords=5) if task_hint else set()
+            entries = list(buf)
             lines = []
-            for entry in buf:
-                lines.append(f"{entry['role']}: {entry['content']}")
+
+            for i, entry in enumerate(entries):
+                is_recent = (i >= len(entries) - 2)  # Last 2 messages always included
+                is_relevant = keyword_overlap(entry['keywords'], task_keywords) >= self.RELEVANCE_THRESHOLD
+
+                if is_recent or is_relevant:
+                    # Inject summary (not full content — stays within budget)
+                    lines.append(f"{entry['role']}: {entry['summary']}")
+
+            if not lines:
+                return ''
+
             context = "RECENT CHAT:\n" + '\n'.join(lines)
             # Hard cap enforcement
             if len(context) > self.MAX_OUTPUT_CHARS:
@@ -475,8 +563,8 @@ class ConversationBuffer:
             return context
 
 
-# Global conversation buffer
-conv_buffer = ConversationBuffer(max_owner_messages=5)
+# Global conversation buffer (Vision-enabled, 10 message window)
+conv_buffer = ConversationBuffer(max_messages=10)
 
 
 # ─── Token Budget Management ─────────────────────────────────
