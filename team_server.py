@@ -107,7 +107,7 @@ API_TIMEOUTS = {
     'anthropic': 60,    # Opus — slow but worth the wait for architecture
     'openai': 45,       # Codex — production hardening takes time
     'xai': 45,          # Grok — prototyping can be heavy
-    'deepseek': 40,     # DeepSeek — reasoning takes a moment
+    'deepseek': 90,     # DeepSeek R1 reasoning can take 40-60s
 }
 
 
@@ -187,18 +187,26 @@ def call_model(model_key, system_prompt, user_message, max_tokens=None):
             }
 
         elif provider == 'deepseek':
+            # DeepSeek Reasoner (R1) doesn't support system messages — merge into user
+            if model == 'deepseek-reasoner':
+                messages = [{'role': 'user', 'content': f"{system_prompt}\n\n{user_message}"}]
+            else:
+                messages = [
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user', 'content': user_message},
+                ]
             resp = requests.post(
                 'https://api.deepseek.com/chat/completions',
                 headers={'Authorization': f'Bearer {API_KEYS["deepseek"]}', 'Content-Type': 'application/json'},
-                json={'model': model, 'max_tokens': mt, 'messages': [
-                    {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': user_message},
-                ]},
+                json={'model': model, 'max_tokens': mt, 'messages': messages},
                 timeout=timeout,
             )
             resp.raise_for_status()
             d = resp.json()
-            return d['choices'][0]['message']['content'], {
+            msg = d['choices'][0]['message']
+            # R1 puts reasoning in reasoning_content; content may be null
+            text = msg.get('content') or msg.get('reasoning_content') or ''
+            return text, {
                 'input': d.get('usage', {}).get('prompt_tokens', 0),
                 'output': d.get('usage', {}).get('completion_tokens', 0),
             }
