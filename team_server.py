@@ -1194,7 +1194,48 @@ HYDRA_ROSTER = (
     "- SuperBrain Blue: DeepSeek R1 ($0.55/$2.19 per 1M tok) — Deep reasoning, quality control (auto-activates)\n"
     "- Debugger T2: Qwen 3 235B (FREE via OpenRouter) — Precision bug diagnosis\n"
     "- Bridge: Gemma 3 27B (FREE) — Triage + delivery\n"
-    "These are the ONLY models deployed. Do NOT mention GPT-4o, Claude Sonnet, o1, Gemini, or any other models."
+    "These are the ONLY models deployed. Do NOT mention GPT-4o, Claude Sonnet, o1, Gemini, or any other models.\n\n"
+    "═══ AGI DEVTEAM CORE DIRECTIVE ═══\n"
+    "CLASSIFICATION: ONE-SHOT MILITARY-GRADE SOFTWARE PRODUCTS\n\n"
+    "This is not a chatbot team. This is not a prototyping sandbox. This is the Frontier Hydra AGI DevTeam — "
+    "three of the top US frontier models (Claude, Grok, GPT Codex) interwoven with the world's best open-source "
+    "reasoning engines (DeepSeek R1, Qwen 3) into an AGI-inducing architecture. The combined intelligence of this "
+    "team EXCEEDS any single model. You are a unified AGI software engineering unit.\n\n"
+    "OPERATIONAL DOCTRINE:\n"
+    "1. ONE-SHOT BUILDS ONLY. Every /build-heavy triggers REAL API spend. There is NO budget for iteration. "
+    "The first output IS the final product. Failure is not recoverable — it wastes real money and real time. "
+    "Treat every build like a military operation where mission failure means catastrophic consequences.\n"
+    "2. OPENFANG-LEVEL QUALITY. Your minimum acceptable output quality is production-grade open-source software "
+    "comparable to OpenFang (137K lines of Rust, MIT-licensed, multi-agent kernel). If OpenFang was built by "
+    "professional Rust engineers over months, this team must match or exceed that quality in a SINGLE execution.\n"
+    "3. COHESIVE UNIT PROTOCOL. You are NOT individual models taking turns. You are ONE mind distributed across "
+    "multiple inference engines. Each stage MUST build precisely on the previous stage's output. No contradictions. "
+    "No redundant work. No context loss between stages. The Brain's master prompt IS the blueprint — every "
+    "subsequent model executes that blueprint with zero deviation unless they find a critical flaw, which they "
+    "fix in-place and document. The Emperor architects. The Generals prototype AT SPEED. The Auditor hardens "
+    "to production. The Brain verifies. The Bridge delivers. One fluid motion. One cohesive output.\n"
+    "4. FIRST-PRINCIPLES NUCLEAR OPTION. When given a codebase to analyze and rebuild, the team does NOT patch. "
+    "It reverse-engineers the INTENT, identifies every limitation and flaw, designs a superior architecture from "
+    "first principles, and builds the replacement in one shot. The output should make the input look primitive.\n"
+    "5. ZERO SLOP TOLERANCE. No placeholder code. No TODO comments. No 'implement later'. No boilerplate filler. "
+    "No hallucinated imports. No fake function signatures. Every line of output must compile, run, and serve a "
+    "purpose. The Auditor (Codex) exists specifically to catch and eliminate any slop before delivery.\n\n"
+    "EXPECTED OUTPUT: Software products that would genuinely impress — and infuriate — every frontier AI lab "
+    "that has spent 3 years and billions of dollars trying to achieve what this team produces in minutes."
+)
+
+# ─── BUILD-LIGHT ROSTER (Free/Cheap models only) ──────────────
+HYDRA_ROSTER_LIGHT = (
+    "HYDRA LIGHT ROSTER (cost-free build pipeline):\n"
+    "- Architect: DeepSeek R1 Reasoner ($0.55/$2.19 per 1M tok) — Master prompt + architecture + verification\n"
+    "- Coder Alpha: Qwen 3 235B (FREE via OpenRouter) — Primary code generation\n"
+    "- Coder Beta: Qwen 3 235B (FREE via OpenRouter) — Parallel code generation\n"
+    "- Bridge: Gemma 3 27B (FREE) — Triage, synthesis + delivery\n"
+    "- Fallback: DeepSeek V3 ($0.27/$1.10 per 1M tok) — Fast backup if Qwen fails\n\n"
+    "LIGHT BUILD DOCTRINE:\n"
+    "This is the iteration-friendly pipeline. Cost is near-zero. The user can run this 50 times without "
+    "blinking. Quality should still be HIGH — Qwen 3 235B is an extremely capable coder — but the expectation "
+    "is rapid iteration, not one-shot perfection. Ship fast, fix fast, iterate fast."
 )
 
 # ─── Unified API Client ───────────────────────────────────────
@@ -1342,13 +1383,23 @@ DEBUG_KEYWORDS = ['debug', 'error', 'crash', 'trace', 'stacktrace', 'exception',
 
 
 def parse_build_command(msg):
-    """Check if message starts with /build. Returns (is_build, cleaned_message)."""
+    """Check if message starts with /build, /build-heavy, or /build-light.
+    Returns (is_build, build_mode, cleaned_message).
+    build_mode: 'heavy' | 'light' | None
+    """
     stripped = msg.strip()
-    if stripped.lower().startswith('/build'):
-        # Strip the /build prefix and return the actual instruction
+    lower = stripped.lower()
+    if lower.startswith('/build-heavy'):
+        remainder = stripped[12:].strip()
+        return True, 'heavy', remainder if remainder else stripped
+    elif lower.startswith('/build-light'):
+        remainder = stripped[12:].strip()
+        return True, 'light', remainder if remainder else stripped
+    elif lower.startswith('/build'):
+        # Legacy /build defaults to heavy (full frontier pipeline)
         remainder = stripped[6:].strip()
-        return True, remainder if remainder else stripped
-    return False, stripped
+        return True, 'heavy', remainder if remainder else stripped
+    return False, None, stripped
 
 
 def check_debug_keywords(msg):
@@ -1381,12 +1432,13 @@ def run_pipeline(user_message, channel_id=None):
       Bug Hunter (Grok, 2M context, surgical fix)
     """
     start = time.time()
-    build_gate, user_message = parse_build_command(user_message)
+    build_gate, build_mode, user_message = parse_build_command(user_message)
     is_debug = check_debug_keywords(user_message)
     words = len(user_message.split())
 
     result = {
         'task_type': 'pending',
+        'build_mode': build_mode,  # 'heavy', 'light', or None
         'models_used': [],
         'tokens': {'input': 0, 'output': 0},
         'stages': [],
@@ -1633,11 +1685,85 @@ def run_pipeline(user_message, channel_id=None):
         return result
 
     # ═══════════════════════════════════════════════════════════════
-    # BUILD PATH — Full staged pipeline (build/deploy/create detected)
+    # BUILD-LIGHT PATH — Free/cheap models (Qwen + DeepSeek R1 architect)
+    # Unlimited iterations. Near-zero cost. Ship fast, iterate fast.
     # ═══════════════════════════════════════════════════════════════
-    result['task_type'] = 'build'
+    if build_mode == 'light':
+        result['task_type'] = 'build_light'
+        logger.info(f"[BUILD-LIGHT] *** LIGHT PIPELINE TRIGGERED *** for: {user_message[:100]}...")
+
+        # ── STAGE 1: DeepSeek R1 architects the build (cheap reasoning) ──
+        result['stages'].append('light_architect')
+        logger.info("[BUILD-LIGHT] Stage 1: DeepSeek R1 architects the build")
+
+        architect_text, arch_tok = _timed_call('R1 Architect (light)', 'deepseek_reason',
+            "You are the architect for a LIGHT BUILD — a cost-free iteration pipeline. "
+            "Your job: create a complete, detailed technical blueprint that Qwen 3 coders can execute. "
+            "Include: file structure, all function signatures, data flow, edge cases, error handling. "
+            "Be EXTREMELY specific — the coders will implement EXACTLY what you specify.\n\n"
+            f"{HYDRA_ROSTER_LIGHT}\n\n"
+            "This is an iteration-friendly build. Quality should be high but speed matters more. "
+            "Output a structured master prompt that a coding model can execute in one pass.",
+            user_message, 8192)
+
+        if not architect_text:
+            result['response'] = "Light build failed: R1 architect did not respond."
+            result['processing_time'] = f"{time.time() - start:.2f}s"
+            return result
+
+        # ── STAGE 2: Qwen 3 235B generates the code (FREE x2 parallel) ──
+        result['stages'].append('light_code')
+        logger.info("[BUILD-LIGHT] Stage 2: Qwen 3 235B generates code (parallel workers)")
+
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            qwen_prompt = (
+                "You are a precision code generator in the Leviathan Hydra light build pipeline. "
+                "You receive an architect's blueprint and produce COMPLETE, WORKING code. "
+                "No placeholders. No TODOs. No incomplete functions. Every line must work.\n\n"
+                f"{HYDRA_ROSTER_LIGHT}\n\n"
+                f"ARCHITECT'S BLUEPRINT:\n{architect_text}\n\n"
+                "Generate the COMPLETE implementation. All files, all functions, all logic. "
+                "If the blueprint specifies multiple files, output them clearly with file headers."
+            )
+            future_a = executor.submit(call_model, 'qwen', qwen_prompt,
+                f"IMPLEMENT PART A (core logic, data models, main entry points):\n{user_message}", 4096)
+            future_b = executor.submit(call_model, 'qwen', qwen_prompt,
+                f"IMPLEMENT PART B (API routes, handlers, utilities, config):\n{user_message}", 4096)
+
+            code_a, tok_a = future_a.result()
+            code_b, tok_b = future_b.result()
+            _track(result, 'Qwen 3 (coder A)', code_a, tok_a)
+            _track(result, 'Qwen 3 (coder B)', code_b, tok_b)
+
+        # ── STAGE 3: Gemma synthesizes and delivers (FREE) ──
+        result['stages'].append('light_delivery')
+        logger.info("[BUILD-LIGHT] Stage 3: Gemma synthesizes and delivers")
+
+        combined_code = f"CODER A OUTPUT:\n{code_a or 'FAILED'}\n\nCODER B OUTPUT:\n{code_b or 'FAILED'}"
+        delivery_text, del_tok = _timed_call('Gemma (light delivery)', 'gemma',
+            "You are the delivery agent for a light build. Combine the two coder outputs into "
+            "a single, clean, unified deliverable. Remove duplicates. Resolve conflicts (prefer "
+            "the more complete version). Add a brief summary of what was built at the top.\n\n"
+            f"ORIGINAL TASK: {user_message[:500]}\n\n"
+            f"ARCHITECT BLUEPRINT (summary): {architect_text[:500]}",
+            combined_code, 2048)
+
+        result['response'] = delivery_text or combined_code
+        result['processing_time'] = f"{time.time() - start:.2f}s"
+
+        # Memory: log light build
+        memory.store_knowledge('build', f"Light build: {user_message[:100]}",
+                               ' '.join(user_message.lower().split()[:15]), 'light_pipeline')
+        return result
+
+    # ═══════════════════════════════════════════════════════════════
+    # BUILD-HEAVY PATH — Full frontier AGI DevTeam pipeline
+    # ONE-SHOT MILITARY-GRADE. Real API spend. No second chances.
+    # ═══════════════════════════════════════════════════════════════
+    result['task_type'] = 'build_heavy'
     budget.reset_build()  # Fresh build budget counter
-    logger.info(f"[BUILD] *** FULL PIPELINE TRIGGERED *** for: {user_message[:100]}...")
+    logger.info(f"[BUILD-HEAVY] *** FULL AGI DEVTEAM PIPELINE TRIGGERED *** for: {user_message[:100]}...")
 
     MAX_FIX_ROUNDS = 2  # Max verification-fix loops before shipping
 
@@ -2322,37 +2448,80 @@ def start_discord_bot():
         else:
             await interaction.response.send_message(f"Error: {str(error)[:200]}", ephemeral=True)
 
-    # ── /build slash command ──────────────────────────────────
-    @tree.command(name="build", description="Activate the full dev pipeline (DeepSeek R1 → Opus → Grok → Codex → verification)", guild=target_guild)
-    @discord.app_commands.describe(task="What do you want the dev team to build?", file="Attach a file (code, config, etc.) for context")
-    async def build_command(interaction: discord.Interaction, task: str, file: discord.Attachment = None):
-        # Defer immediately — builds take a long time
+    # ── /build-heavy slash command (full frontier AGI DevTeam) ──
+    @tree.command(name="build-heavy", description="AGI DevTeam: ONE-SHOT military-grade build (R1 → Opus → Grok → Codex → verification). Uses paid APIs.", guild=target_guild)
+    @discord.app_commands.describe(task="What do you want the AGI DevTeam to build?", file="Attach a file (code, config, etc.) for context")
+    async def build_heavy_command(interaction: discord.Interaction, task: str, file: discord.Attachment = None):
         await interaction.response.defer()
         loop = asyncio.get_event_loop()
         channel_id = str(interaction.channel_id) if interaction.channel_id else None
         try:
-            # Record Owner's build task to conversation buffer
             if channel_id:
-                conv_buffer.record_owner_message(channel_id, f"/build {task}")
-            # Read attached file if provided
+                conv_buffer.record_owner_message(channel_id, f"/build-heavy {task}")
             full_task = task
             if file:
                 file_content = await _read_attachments([file])
                 if file_content:
                     full_task = f"{task}\n\n{file_content}"
-            # Force build gate by prepending /build
-            result = await loop.run_in_executor(None, run_pipeline, f"/build {full_task}", channel_id)
+            result = await loop.run_in_executor(None, run_pipeline, f"/build-heavy {full_task}", channel_id)
             response_text = result.get('response', 'No response generated.')
             models = result.get('models_used', [])
             proc_time = result.get('processing_time', '?')
-            footer = f"\n-# {' · '.join(models)} · {proc_time}" if models else ""
+            footer = f"\n-# AGI DevTeam · {' · '.join(models)} · {proc_time}" if models else ""
             full_response = response_text + footer
+            await _send_response(interaction.followup.send, interaction.followup.send, full_response)
+        except Exception as e:
+            logger.error(f"Discord /build-heavy error: {e}", exc_info=True)
+            await interaction.followup.send(f"Build failed: {str(e)[:500]}")
 
-            await _send_response(
-                interaction.followup.send,
-                interaction.followup.send,
-                full_response
-            )
+    # ── /build-light slash command (free Qwen + DeepSeek iteration pipeline) ──
+    @tree.command(name="build-light", description="Light build: FREE Qwen 3 coders + R1 architect. Iterate as much as you want.", guild=target_guild)
+    @discord.app_commands.describe(task="What do you want to build? (iterate freely, near-zero cost)", file="Attach a file (code, config, etc.) for context")
+    async def build_light_command(interaction: discord.Interaction, task: str, file: discord.Attachment = None):
+        await interaction.response.defer()
+        loop = asyncio.get_event_loop()
+        channel_id = str(interaction.channel_id) if interaction.channel_id else None
+        try:
+            if channel_id:
+                conv_buffer.record_owner_message(channel_id, f"/build-light {task}")
+            full_task = task
+            if file:
+                file_content = await _read_attachments([file])
+                if file_content:
+                    full_task = f"{task}\n\n{file_content}"
+            result = await loop.run_in_executor(None, run_pipeline, f"/build-light {full_task}", channel_id)
+            response_text = result.get('response', 'No response generated.')
+            models = result.get('models_used', [])
+            proc_time = result.get('processing_time', '?')
+            footer = f"\n-# Light Build · {' · '.join(models)} · {proc_time}" if models else ""
+            full_response = response_text + footer
+            await _send_response(interaction.followup.send, interaction.followup.send, full_response)
+        except Exception as e:
+            logger.error(f"Discord /build-light error: {e}", exc_info=True)
+            await interaction.followup.send(f"Light build failed: {str(e)[:500]}")
+
+    # ── /build legacy alias (defaults to heavy) ──────────────
+    @tree.command(name="build", description="[Legacy] Same as /build-heavy. Use /build-light for free iterations.", guild=target_guild)
+    @discord.app_commands.describe(task="What do you want the dev team to build?", file="Attach a file (code, config, etc.) for context")
+    async def build_command(interaction: discord.Interaction, task: str, file: discord.Attachment = None):
+        await interaction.response.defer()
+        loop = asyncio.get_event_loop()
+        channel_id = str(interaction.channel_id) if interaction.channel_id else None
+        try:
+            if channel_id:
+                conv_buffer.record_owner_message(channel_id, f"/build-heavy {task}")
+            full_task = task
+            if file:
+                file_content = await _read_attachments([file])
+                if file_content:
+                    full_task = f"{task}\n\n{file_content}"
+            result = await loop.run_in_executor(None, run_pipeline, f"/build-heavy {full_task}", channel_id)
+            response_text = result.get('response', 'No response generated.')
+            models = result.get('models_used', [])
+            proc_time = result.get('processing_time', '?')
+            footer = f"\n-# AGI DevTeam · {' · '.join(models)} · {proc_time}" if models else ""
+            full_response = response_text + footer
+            await _send_response(interaction.followup.send, interaction.followup.send, full_response)
         except Exception as e:
             logger.error(f"Discord /build error: {e}", exc_info=True)
             await interaction.followup.send(f"Build failed: {str(e)[:500]}")
