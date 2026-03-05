@@ -2559,7 +2559,7 @@ def start_discord_bot():
             await interaction.response.send_message(f"Error: {str(error)[:200]}", ephemeral=True)
 
     # ── /build-heavy slash command (full frontier AGI DevTeam) ──
-    @tree.command(name="build-heavy", description="AGI DevTeam: ONE-SHOT military-grade build (R1 → Opus → Grok → Codex → verification). Uses paid APIs.", guild=target_guild)
+    @tree.command(name="build-heavy", description="ONE-SHOT frontier build (R1/Opus/Grok/Codex + verification). Paid APIs.", guild=target_guild)
     @discord.app_commands.describe(task="What do you want the AGI DevTeam to build?", file="Attach a file (code, config, etc.) for context")
     async def build_heavy_command(interaction: discord.Interaction, task: str, file: discord.Attachment = None):
         await interaction.response.defer()
